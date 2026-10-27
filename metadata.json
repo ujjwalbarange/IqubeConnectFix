@@ -1,0 +1,8 @@
+{
+  "name": "iQube Cockpit",
+  "description": "A high-performance, open-source telemetry dashboard for TVS iQube electric scooters featuring real-time BLE data and reactive UI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

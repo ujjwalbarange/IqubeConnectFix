@@ -1,0 +1,499 @@
+package com.example.model
+
+import java.util.Locale
+
+/**
+ * Target BLE Hardware & UUID Constants for TVS iQube (SmartXonnect BLE Cluster)
+ * Verified from unfiltered btsnoop_hci.log (#229, #270, #315), btsnooz_hci.log, and decompiled SmartXonnect smali.
+ */
+object IqubeBleSpec {
+    const val TARGET_MAC_ADDRESS = "F8:55:48:72:96:DA"
+    const val ADVERTISED_BLE_NAME = "TVSiQUBECJI573"
+    const val DEFAULT_VEHICLE_ID = "TVSiQUBEJI573"
+    const val CLUSTER_VEHICLE_ID_DEFAULT = "TVSiQUBEJI573"
+    const val NAME_FILTER_PREFIX = "TVS"
+
+    // Custom 128-bit SmartXonnect Primary Service UUID (ASCII: "TVSMVGSASBENTORQ")
+    const val SERVICE_UUID_SMARTXONNECT = "5456534d-5647-5341-5342-454e544f5251"
+    const val SERVICE_UUID_ASCII = "TVSMVGSASBENTORQ"
+    // Telemetry Notify Characteristic (Handle 0x001E, 16-bit 0x5354, ASCII "ST")
+    const val CHAR_UUID_TELEMETRY_NOTIFY = "00005354-0000-1000-8000-00805f9b34fb"
+    // Command Write Characteristic (Handle 0x0022, 16-bit 0x5352, ASCII "SR")
+    const val CHAR_UUID_COMMAND_WRITE = "00005352-0000-1000-8000-00805f9b34fb"
+    const val DESCRIPTOR_UUID_CCCD = "00002902-0000-1000-8000-00805f9b34fb"       // Handle 0x001F
+    const val DESCRIPTOR_UUID_CUD = "00002901-0000-1000-8000-00805f9b34fb"        // Handle 0x0023
+
+    // Protocol Framing Bytes (Every 20-byte frame sent or received ends with Byte 19 = 0xFF)
+    const val HEADER_TELEMETRY: Byte = 0x5A // 'Z' (90 decimal)
+    const val HEADER_ASCII_CMD: Byte = 0x5B // '[' (91 decimal)
+    const val FOOTER_DELIMITER: Byte = 0xFF.toByte()
+    const val STANDARD_FRAME_SIZE = 20
+    const val MAX_LOCATION_ASCII_BYTES = 17 // Bytes 2..18 (17 UTF-8/ASCII chars), Byte 19 = 0xFF
+    const val MAX_NAV_STREET_ASCII_BYTES = 15 // Bytes 4..18 (15 UTF-8/ASCII chars), Byte 19 = 0xFF
+
+    // Incoming Telemetry Opcodes (Scooter -> Phone on 0x5354 / Handle 0x001E)
+    const val OPCODE_SPEED_ODOMETER: Byte = 0x10 // Byte 2 = speed km/h, Bytes 3..5 = uint24 BE total odometer (0.1 km)
+    const val OPCODE_TRIPS_CHARGING: Byte = 0x11 // Bytes 2..4 = Trip A (0.1 km), Byte 5 = Charging (0x01), Byte 6 = SoC mirror, Bytes 7..9 = Trip B (0.1 km)
+    const val OPCODE_BATTERY_RANGE: Byte = 0x13  // Byte 2 = SoC %, Bytes 3..4 = uint16 BE Cluster Range (0.1 km), Byte 5 = State Flag (0x06 charging)
+    const val OPCODE_MEDIA_CONTROL: Byte = 0x6B  // Byte 2 = Handlebar Media Key (0x00=Play, 0x01=Pause, 0x02=Toggle, 0x03=Next, 0x04=Prev, 0x05=Vol+, 0x06=Vol-)
+    const val OPCODE_VEHICLE_ID: Byte = 0x7D     // Bytes 2..18 = ASCII Vehicle ID ("TVSiQUBEJI573")
+
+    // Outgoing Command Data IDs on 0x5352 (Handle 0x0022)
+    const val DATA_ID_CALLER_43: Byte = 0x43       // 'C' — createMobileToClusterArray (0x5B 0x43)
+    const val DATA_ID_NAV_MANEUVER_49: Byte = 0x49 // 'I' — Navigation Maneuver & Distance (0x5B 0x49)
+    const val DATA_ID_HEARTBEAT_4A: Byte = 0x4A    // 'J' — Clock Sync Heartbeat [JD (0x5B 0x4A 0x44)
+    const val DATA_ID_NAV_ASSIST_4E: Byte = 0x4E   // 'N' — Navigation Street / Dest Reached (0x5B 0x4E)
+    const val DATA_ID_HANDSHAKE_52: Byte = 0x52    // 'R' — Handshake [RU (0x5B 0x52 0x55) & Rider Greeting (0x5B 0x52)
+    const val DATA_ID_LOCATION_5C: Byte = 0x5C     // '\' — GPS Locality Text (0x5B 0x5C)
+    const val DATA_ID_CALL_STATE_5D: Byte = 0x5D   // ']' — writeCallStateForIQube (0x5B 0x5D 0x43)
+    const val SONG_NAME_PACKET: Byte = 0x62        // 'b' — Music Track Title Banner (0x5B 0x62)
+
+    // Verified Trip Subcommands for createVehicleDataArray (0x5A 0xF1 0x00 <tripVal> ... 0xFF):
+    const val SUBCMD_SWITCH_TRIP_A: Byte = 0x00
+    const val SUBCMD_SWITCH_TRIP_B: Byte = 0x01
+    const val SUBCMD_RESET_ACTIVE_TRIP: Byte = 0x02
+
+    // Call State Bytes for writeCallStateForIQube
+    const val CALL_STATE_RINGING: Byte = 0x00
+    const val CALL_STATE_ANSWERED: Byte = 0x01
+    const val CALL_STATE_ENDED: Byte = 0x02
+
+    // Navigation Unit Bytes for 0x5B 0x49 (Byte 5)
+    const val NAV_UNIT_METERS: Byte = 0x01
+    const val NAV_UNIT_KILOMETERS: Byte = 0x02
+
+    // Charging State Constants
+    const val FLAG_0X13_CHARGING_MODE: Byte = 0x06
+    const val FLAG_0X11_CHARGING_ACTIVE: Byte = 0x01
+    const val CHARGING_DEBOUNCE_FRAMES = 3           // 3-frame hysteresis debounce before latching charging = true
+    const val VERIFIED_CAPTURE_SEC_PER_PCT = 115.7   // +31.1% / hr from btsnoop_hci.log charging capture
+    const val DEFAULT_0_TO_80_SEC_PER_PCT = 123.75   // 2 hr 45 min (9,900s) for 0% -> 80%
+    const val DEFAULT_80_TO_100_SEC_PER_PCT = 180.0  // 3 min (180s) per 1% taper for 80% -> 100%
+    const val DEFAULT_CHARGING_SEC_PER_PCT = 123.75
+
+    // Link, FIFO Spacing & Timing Constants
+    const val REQUESTED_MTU = 517
+    const val EXPECTED_NEGOTIATED_MTU = 247
+    const val INTER_COMMAND_SPACING_MS = 120L        // 120 ms minimum spacing between FIFO GATT writes
+    const val NAVIGATION_INTER_PACKET_DELAY_MS = 400L // 400 ms (0x190 ms) sleep between Nav Packet 1 (0x5B 0x49) and Packet 2 (0x5B 0x4E)
+    const val CALLER_REPEAT_TIMER_MS = 500L          // 500 ms iQubeCallerDataSendTimer while ringing
+    const val WRITE_ACK_TIMEOUT_MS = 500L
+    const val LINK_WATCHDOG_DEGRADED_MS = 2500L
+    const val SUPERVISION_TIMEOUT_MS = 6000L
+    const val HEARTBEAT_INTERVAL_MS = 1800L
+    const val LOCATION_SYNC_INTERVAL_MS = 10_000L
+    const val PHONE_STATUS_SYNC_INTERVAL_MS = 60_000L
+
+    // True Range Baseline Constants
+    const val DEFAULT_ECO_KM_PER_PCT = 1.00   // 100 km at 100% SoC
+    const val DEFAULT_POWER_KM_PER_PCT = 0.75 // 75 km at 100% SoC
+    const val POWER_TO_ECO_RATIO = 0.75
+}
+
+/**
+ * Handlebar Media Key Command Opcodes emitted by the cluster in frame `0x5A 0x6B` (`Byte [2]`).
+ */
+enum class MusicCommand(val code: Int, val label: String) {
+    PLAY(0x00, "Play"),
+    PAUSE(0x01, "Pause"),
+    PLAY_PAUSE_TOGGLE(0x02, "Play/Pause Toggle"),
+    NEXT_TRACK(0x03, "Next Track"),
+    PREVIOUS_TRACK(0x04, "Previous Track"),
+    VOLUME_UP(0x05, "Volume Up"),
+    VOLUME_DOWN(0x06, "Volume Down");
+
+    companion object {
+        fun fromByte(b: Int): MusicCommand? = entries.firstOrNull { it.code == (b and 0xFF) }
+    }
+}
+
+/**
+ * Exact Turn-by-Turn Navigation Maneuver Constants from Mappls `TurnTypeConstants.smali`.
+ */
+enum class TurnTypeConstant(val code: Int, val title: String, val symbol: String) {
+    TURN_LEFT(0x00, "Turn Left", "↰"),
+    TURN_SHARPLY_LEFT(0x01, "Turn Sharply Left", "↙"),
+    TURN_SLIGHTLY_LEFT(0x02, "Turn Slightly Left", "↖"),
+    TURN_RIGHT(0x03, "Turn Right", "↱"),
+    TURN_SHARPLY_RIGHT(0x04, "Turn Sharply Right", "↘"),
+    TURN_SLIGHTLY_RIGHT(0x05, "Turn Slightly Right", "↗"),
+    U_TURN(0x06, "U-Turn", "↶"),
+    CONTINUE_STRAIGHT(0x07, "Continue Straight", "↑"),
+    DESTINATION_REACHED(0x08, "Destination Reached", "🏁"),
+    KEEP_LEFT(0x09, "Keep Left", "⇖"),
+    KEEP_RIGHT(0x0A, "Keep Right", "⇗"),
+    TAKE_LEFT_AT(0x0B, "Take Left At", "↰"),
+    TAKE_RIGHT_AT(0x0C, "Take Right At", "↱"),
+    TAKE_LEFT_AT_END(0x0D, "Take Left At End", "↰"),
+    TAKE_RIGHT_AT_END(0x0E, "Take Right At End", "↱"),
+    FORK_LEFT(0x0F, "Fork Left", "⑂←"),
+    FORK_RIGHT(0x10, "Fork Right", "⑂→"),
+    CONTINUE_STRAIGHT_AT_INTERSECTION(0x15, "Straight At Intersection", "┼↑"),
+    RIGHT_U_TURN(0x29, "Right U-Turn", "↷"),
+    ROUNDABOUT(0x44, "Roundabout", "⟳"),
+    ROUNDABOUT_LEFT(0x45, "Roundabout Left", "⟲"),
+    ROTARY(0x48, "Rotary", "❂");
+
+    val hexLabel: String
+        get() = String.format(Locale.US, "0x%02X", code)
+}
+
+/**
+ * State of the Turn-by-Turn Navigation 2-Packet Injector (`0x5B 0x49` + 400ms + `0x5B 0x4E`).
+ */
+data class NavigationManeuverState(
+    val selectedTurn: TurnTypeConstant = TurnTypeConstant.TURN_LEFT,
+    val distanceMeters: Int = 250,
+    val unitByte: Int = 0x01, // 0x01 = meters (m), 0x02 = kilometers (0.1 km units)
+    val etaMinutes: Int = 12,
+    val streetName: String = "Wardha Rd",
+    val isRouteSimulationRunning: Boolean = false,
+    val currentRouteStepIndex: Int = 0,
+    val totalRouteSteps: Int = 5,
+    val lastPacket1Hex: String? = null,
+    val lastPacket2Hex: String? = null,
+    val lastSentTimestampMs: Long? = null
+)
+
+/**
+ * State of the Media / Music Track Banner (`0x5B 0x62`) and Handlebar Media Key (`0x5A 0x6B`) controller.
+ */
+data class MediaPlayerState(
+    val trackTitle: String = "Midnight City",
+    val artistName: String = "M83",
+    val isPlaying: Boolean = false,
+    val volumePercent: Int = 75,
+    val playlistIndex: Int = 0,
+    val lastHandlebarCommand: MusicCommand? = null,
+    val lastHandlebarCommandTimestampMs: Long? = null,
+    val lastSentBannerHex: String? = null
+)
+
+/**
+ * State of the Smartphone Battery & Network Status Bar Sync (`0x5B 0x52 0x55`) and Clock Sync (`0x5B 0x4A 0x44`).
+ */
+data class PhoneStatusState(
+    val phoneBatteryPct: Int = 85,
+    val isBatteryOverrideEnabled: Boolean = false,
+    val isPhoneCharging: Boolean = false,
+    val signalBars: Int = 4,
+    val lastPhoneStatusSyncMs: Long? = null,
+    val lastClockSyncMs: Long? = null
+)
+
+enum class BleConnectionPhase {
+    DISCONNECTED,
+    SCANNING,
+    CONNECTING_GATT,
+    DISCOVERING_SERVICES,
+    ENABLING_CCCD,
+    NEGOTIATING_MTU,
+    SENDING_HANDSHAKE,
+    STREAMING_ACTIVE,
+    REPLAYING_RIDING_LOG,
+    REPLAYING_CHARGING_LOG,
+    RECONNECTING_BACKOFF
+}
+
+enum class RideMode(val label: String) {
+    ECO("ECO MODE"),
+    POWER("POWER MODE"),
+    CHARGING("CHARGING ACTIVE"),
+    PARK("PARK / STANDBY")
+}
+
+/**
+ * User-configurable Byte-Offset Mapper for incoming 20-byte frames.
+ */
+data class ByteOffsetMapping(
+    val odometerStartOffsetIn0x10: Int = 3, // In 0x10 frame: Bytes 3..5 uint24 BE in 0.1 km (05 7B 54 = 35,925.2 km)
+    val rangeStartOffsetIn0x13: Int = 3,    // In 0x13 frame: Bytes 3..4 uint16 BE in 0.1 km (03 F2 = 101.0 km)
+    val stateFlagOffsetIn0x13: Int = 5,     // In 0x13 frame: Byte 5 = 0x06 when charging
+    val tripAStartOffsetIn0x11: Int = 2,    // In 0x11 frame: Bytes 2..4 uint24 BE in 0.1 km (00 00 03 = 0.3 km)
+    val chargingFlagOffsetIn0x11: Int = 5,  // In 0x11 frame: Byte 5 = 0x01 when charging
+    val socMirrorOffsetIn0x11: Int = 6,     // In 0x11 frame: Byte 6 = SoC % mirror
+    val tripBStartOffsetIn0x11: Int = 7     // In 0x11 frame: Bytes 7..9 uint24 BE in 0.1 km (00 00 0A = 1.0 km)
+)
+
+/**
+ * Editable subcommand configuration for the 3 verified Trip Control buttons (`createVehicleDataArray` / `buildTripPacket`).
+ * Defaults to `0x00` = Switch to Trip A, `0x01` = Switch to Trip B, `0x02` = Reset Active Trip.
+ */
+data class TripSubcommandConfig(
+    val switchTripAByte: Int = IqubeBleSpec.SUBCMD_SWITCH_TRIP_A.toInt() and 0xFF, // 0x00
+    val switchTripBByte: Int = IqubeBleSpec.SUBCMD_SWITCH_TRIP_B.toInt() and 0xFF, // 0x01
+    val resetActiveTripByte: Int = IqubeBleSpec.SUBCMD_RESET_ACTIVE_TRIP.toInt() and 0xFF // 0x02
+)
+
+/**
+ * Strongly-typed representation of a single decoded BLE packet from 0x5354 (Handle 0x001E).
+ */
+sealed class DecodedIqubePacket(
+    open val timestampMs: Long,
+    open val rawBytes: ByteArray
+) {
+    data class SpeedOdometerFrame(
+        override val timestampMs: Long,
+        override val rawBytes: ByteArray,
+        val speedKmh: Int,
+        val totalOdometerKm: Double
+    ) : DecodedIqubePacket(timestampMs, rawBytes)
+
+    data class BatteryRangeFrame(
+        override val timestampMs: Long,
+        override val rawBytes: ByteArray,
+        val batteryPercent: Int,
+        val clusterRangeKm: Double,
+        val stateFlagByte5: Int,
+        val isChargingMode0x06: Boolean
+    ) : DecodedIqubePacket(timestampMs, rawBytes)
+
+    data class TripsAndChargingFrame(
+        override val timestampMs: Long,
+        override val rawBytes: ByteArray,
+        val tripAKm: Double,
+        val tripBKm: Double,
+        val chargingActiveFlagByte5: Int,
+        val isChargingActive: Boolean,
+        val socMirrorPercent: Int
+    ) : DecodedIqubePacket(timestampMs, rawBytes)
+
+    data class VehicleIdentityFrame(
+        override val timestampMs: Long,
+        override val rawBytes: ByteArray,
+        val vehicleIdAscii: String
+    ) : DecodedIqubePacket(timestampMs, rawBytes)
+
+    data class MediaControlFrame(
+        override val timestampMs: Long,
+        override val rawBytes: ByteArray,
+        val commandCodeByte2: Int,
+        val command: MusicCommand?
+    ) : DecodedIqubePacket(timestampMs, rawBytes)
+}
+
+/**
+ * Complete reactive Telemetry State exposed to the Compose UI.
+ */
+data class TelemetryState(
+    // Speed & Total Hardware Odometer (from 0x5A 0x10)
+    val speedKmh: Int? = null,
+    val peakSpeedKmh: Int = 0,
+    val accelerationMs2: Double? = null,
+    val integratedDistanceMeters: Double = 0.0,
+    val clusterIntegratedStepKm: Double = 0.0,
+    val sprint0To30Sec: Double? = null,
+    val sprint0To40Sec: Double? = null,
+    val isSprintTimerRunning: Boolean = false,
+    val odometerKm: Double? = null,
+    val clusterBrightnessLevel: Int? = null,
+    val ignitionAssistFlag: Int? = null,
+    val hardwareSprint0To30Ms: Int? = null,
+
+    // Battery SoC, Cluster BMS DTE Range & Charging Flag (from 0x5A 0x13 & 0x5A 0x11)
+    val batteryPercent: Int? = null,
+    val socMirror0x11: Int? = null,
+    val clusterRangeKm: Double? = null,
+    val stateFlag0x13Byte5: Int? = null,
+    val chargingFlag0x11Byte5: Int? = null,
+    val isCharging: Boolean = false,
+    val packVoltageVolts: Float? = null,
+
+    // Hardware Trip A & Trip B (from 0x5A 0x11)
+    val tripAKm: Double? = null,
+    val tripBKm: Double? = null,
+    val activeTripTab: Int = 0, // 0 = Trip A, 1 = Trip B, 2 = ODO, 3 = Sub-Meter
+    val lastOdometerSyncMs: Long? = null,
+
+    // Vehicle Model & ID String (from 0x5A 0x7D Bytes 2..18)
+    val vehicleIdString: String? = null,
+    val rideMode: RideMode? = null,
+    val isRegenActive: Boolean = false,
+    val isIgnitionUnlocked: Boolean? = null,
+
+    // Handlebar Media Control (from 0x5A 0x6B Byte 2)
+    val lastMediaCommand: MusicCommand? = null,
+    val lastMediaCommandTimestampMs: Long? = null,
+
+    // Latest raw 20-byte frames per opcode for Live Hex Inspector
+    val latestFrame0x10: ByteArray? = null,
+    val latestFrame0x13: ByteArray? = null,
+    val latestFrame0x7D: ByteArray? = null,
+    val latestFrame0x11: ByteArray? = null,
+    val latestFrame0x6B: ByteArray? = null,
+    val packetCount0x10: Int = 0,
+    val packetCount0x13: Int = 0,
+    val packetCount0x7D: Int = 0,
+    val packetCount0x11: Int = 0,
+    val packetCount0x6B: Int = 0,
+    val malformedPacketCount: Int = 0,
+    val lastPacketTimestampMs: Long? = null
+)
+
+/**
+ * Live Charging Monitor & 3-Tier Charging Predictor State.
+ * - Tier 1 Default 0-80% baseline: `123.75s per +1%` (`2h 45m` for `0-80%`)
+ * - Tier 2 Historical sessions average (`savedChargingSessions`)
+ * - Tier 3 Live `+1%` step timing (`115.7s per +1%` = `+31.1%/hr`)
+ */
+data class ChargingMonitorState(
+    val isCharging: Boolean = false,
+    val currentBatteryPct: Int? = null,
+    val clusterRangeKm: Double? = null,
+    val sessionStartBatteryPct: Int? = null,
+    val pctGainedThisSession: Int = 0,
+    val activeSecondsPerPct: Double = IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT,
+    val baselineSecondsPerPct: Double = IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT,
+    val liveMeasuredSecondsPerPct: Double? = null,
+    val chargingSpeedPctPerHour: Double = 29.1,
+    val remainingSecondsTo80: Long? = null,
+    val remainingSecondsTo100: Long? = null,
+    val baselineRemainingSecondsTo80: Long? = null,
+    val baselineRemainingSecondsTo100: Long? = null,
+    val predictionModeLabel: String = "Tier 1: Default Baseline (2h 45m 0–80% = 123.75s/%)",
+    val isUsingLiveStepTiming: Boolean = false,
+    val completedStepsCount: Int = 0
+)
+
+data class SavedChargingSession(
+    val id: String,
+    val startTimeMs: Long,
+    val endTimeMs: Long,
+    val startPct: Int,
+    val endPct: Int,
+    val pctGained: Int,
+    val durationSeconds: Long,
+    val avgSecondsPerPct: Double
+)
+
+/**
+ * Offline / Disconnected "Last Seen" Scooter Snapshot persisted in local storage.
+ */
+data class LastSeenScooterState(
+    val timestampMs: Long,
+    val batteryPct: Int,
+    val odometerKm: Double,
+    val clusterRangeKm: Double,
+    val tripAKm: Double,
+    val tripBKm: Double,
+    val locationName: String,
+    val latitude: Double = 21.0922,
+    val longitude: Double = 79.0560,
+    val wasCharging: Boolean,
+    val vehicleId: String
+)
+
+/**
+ * Dedicated Caller ID Banner Relay State (`0x5B 0x43` / `createMobileToClusterArray` + 500ms `iQubeCallerDataSendTimer`).
+ */
+data class IncomingCallRelayState(
+    val isRinging: Boolean = false,
+    val fullCallerName: String = "Rahul Sharma",
+    val extractedFirstName: String = "Rahul",
+    val clusterFormattedText: String = "Rahul",
+    val callStateByte: Int = IqubeBleSpec.CALL_STATE_ENDED.toInt(),
+    val packetsTransmittedCount: Int = 0,
+    val ringStartTimeMs: Long? = null
+)
+
+/**
+ * True Range Calculation Output (Rolling 3-Trip + Live Trip Efficiency vs. Scooter Cluster BMS DTE).
+ */
+data class TrueRangeCalculation(
+    val trueEcoRangeKm: Double?,
+    val truePowerRangeKm: Double?,
+    val ecoKmPerPct: Double = IqubeBleSpec.DEFAULT_ECO_KM_PER_PCT,
+    val powerKmPerPct: Double = IqubeBleSpec.DEFAULT_POWER_KM_PER_PCT,
+    val totalDistanceLearnedKm: Double = 0.0,
+    val totalBatteryUsedLearnedPct: Int = 0,
+    val contributingTripsCount: Int = 0,
+    val isUsingLearnedEfficiency: Boolean = false,
+    val calculationSourceLabel: String = "Default Baseline (Eco 1.00 km/% • Power 0.75 km/%)"
+)
+
+data class ActiveTripSession(
+    val startTimeMs: Long,
+    val startLocationName: String,
+    val startLatitude: Double,
+    val startLongitude: Double,
+    val startOdometerKm: Double?,
+    val startBatteryPct: Int?,
+    val speedSamplesSum: Long = 0L,
+    val speedSamplesCount: Int = 0,
+    val peakSpeedKmh: Int = 0,
+    val dominantRideMode: RideMode = RideMode.ECO
+)
+
+data class SavedTripRecord(
+    val id: String,
+    val startTimeMs: Long,
+    val endTimeMs: Long,
+    val durationSeconds: Long,
+    val startLocationName: String,
+    val startLatitude: Double,
+    val startLongitude: Double,
+    val endLocationName: String,
+    val endLatitude: Double,
+    val endLongitude: Double,
+    val distanceKm: Double,
+    val startOdometerKm: Double,
+    val endOdometerKm: Double,
+    val startBatteryPct: Int,
+    val endBatteryPct: Int,
+    val batteryUsedPct: Int,
+    val peakSpeedKmh: Int,
+    val avgSpeedKmh: Double,
+    val rideMode: RideMode,
+    val efficiencyKmPerPct: Double,
+    val disconnectReason: String
+)
+
+data class QueuedWriteCommand(
+    val id: Long,
+    val label: String,
+    val payload: ByteArray,
+    val enqueuedAtMs: Long,
+    val status: WriteCommandStatus = WriteCommandStatus.QUEUED,
+    val ackLatencyMs: Long? = null,
+    val errorDetail: String? = null
+)
+
+enum class WriteCommandStatus {
+    QUEUED,
+    AWAITING_ACK,
+    ACK_RECEIVED,
+    TIMEOUT_500MS,
+    REJECTED_FRAMING,
+    DISCONNECTED_ERROR
+}
+
+data class LastParkedLocation(
+    val locationName: String,
+    val latitude: Double,
+    val longitude: Double,
+    val accuracyMeters: Float,
+    val timestampMs: Long,
+    val batteryPercentAtPark: Int?,
+    val rangeKmAtPark: Double?,
+    val odometerKmAtPark: Double?
+)
+
+data class GpsBleFusionSample(
+    val timestampMs: Long,
+    val wheelSpeedKmh: Int?,
+    val gpsSpeedKmh: Double,
+    val deltaKmh: Double?,
+    val batteryPercent: Int?,
+    val latitude: Double,
+    val longitude: Double,
+    val localityName: String
+)
+
+fun ByteArray.toHexString(separator: String = " "): String =
+    joinToString(separator) { String.format(Locale.US, "%02X", it.toInt() and 0xFF) }
+
+fun ByteArray.toAsciiPreview(): String =
+    map { b ->
+        val code = b.toInt() and 0xFF
+        if (code in 32..126) code.toChar() else '.'
+    }.joinToString("")

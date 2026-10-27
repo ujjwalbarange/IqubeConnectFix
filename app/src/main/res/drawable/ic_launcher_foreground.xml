@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Telemetry Gauge Arc -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M54,24 C37.43,24 24,37.43 24,54 C24,62.28 27.36,69.78 32.79,75.21 L38.45,69.55 C34.47,65.57 32,60.07 32,54 C32,41.85 41.85,32 54,32 C66.15,32 76,41.85 76,54 C76,60.07 73.53,65.57 69.55,69.55 L75.21,75.21 C80.64,69.78 84,62.28 84,54 C84,37.43 70.57,24 54,24 Z" />
+    <!-- Central High-Voltage Lightning Bolt Silhouette -->
+    <path
+        android:fillColor="#00F5A0"
+        android:pathData="M58,36 L42,56 L53,56 L49,74 L67,52 L55,52 Z" />
+</vector>

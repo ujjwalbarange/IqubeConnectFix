@@ -1,0 +1,27 @@
+<resources>
+    <string name="app_name">iQube Cockpit</string>
+    <string name="nav_cockpit">Cockpit</string>
+    <string name="nav_command_studio">Command Studio</string>
+    <string name="nav_gps_logger">Ride &amp; Park</string>
+    <string name="nav_hex_inspector">Hex Inspector</string>
+    <string name="status_disconnected">BLE DISCONNECTED</string>
+    <string name="status_scanning">SCANNING BLE…</string>
+    <string name="status_connecting">HANDSHAKING…</string>
+    <string name="status_connected">BLE CONNECTED</string>
+    <string name="status_replaying">HCI LOG REPLAY</string>
+    <string name="status_degraded">LINK DEGRADED (0x08)</string>
+    <string name="placeholder_percent">-- %</string>
+    <string name="placeholder_speed">--</string>
+    <string name="placeholder_range">-- km</string>
+    <string name="placeholder_volts">--.- V</string>
+    <string name="placeholder_distance">--.- km</string>
+    <string name="action_reset_trip">Reset Trip A</string>
+    <string name="action_cycle_trip">Cycle Trip A/B</string>
+    <string name="action_push_nav">Push Route Nav</string>
+    <string name="action_send_alert">Send Call Alert</string>
+    <string name="action_toggle_lamp">Dashboard Lamp</string>
+    <string name="action_connect_ble">Scan &amp; Connect BLE</string>
+    <string name="action_disconnect_ble">Disconnect</string>
+    <string name="action_replay_hci">Replay btsnooz_hci.log</string>
+    <string name="action_stop_replay">Stop Replay</string>
+</resources>
