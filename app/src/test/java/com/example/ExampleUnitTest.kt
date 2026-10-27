@@ -151,16 +151,24 @@ class ExampleUnitTest {
         assertEquals(0xFF.toByte(), phoneStatus[19])
         assertTrue(dispatcher.validateOutgoingFrame(phoneStatus).isSuccess)
 
-        // 2. Clock & Date Sync Heartbeat [JD (0x5B, 0x4A, 0x44, hh, mm, ss, 0x01, DD, MM, YY, ..., 0xFF)
-        val heartbeat = dispatcher.buildClockSyncPacket()
+        // Verify ~20% phone battery encodes 1/4 bars instead of hardcoded 4/4 bars
+        val lowBattPhoneStatus = dispatcher.buildPhoneStatusPacket(batteryPct = 20, signalBars = 4)
+        assertEquals(20.toByte(), lowBattPhoneStatus[3])
+        assertEquals(1.toByte(), lowBattPhoneStatus[4]) // 1/4 battery bars at 20%
+        assertEquals(4.toByte(), lowBattPhoneStatus[6]) // 4/4 cellular bars
+
+        // 2. Clock & Date Sync Heartbeat [J (0x5B, 0x4A, statusByte, hh, mm, ss, 0x01, DD, MM, YY, 0, battBars, ..., 0xFF)
+        val heartbeat = dispatcher.buildClockSyncPacket(batteryPct = 20, signalBars = 4)
         assertEquals(20, heartbeat.size)
+        assertEquals(0x14.toByte(), heartbeat[2]) // (1 << 4) | 4 = 0x14 (1/4 batt bars, 4/4 sig bars)
         assertEquals(0x01.toByte(), heartbeat[6])
         assertTrue(heartbeat[7] in 1..31)
         assertTrue(heartbeat[8] in 1..12)
+        assertEquals(1.toByte(), heartbeat[11])
         assertEquals(0xFF.toByte(), heartbeat[19])
         assertTrue(dispatcher.validateOutgoingFrame(heartbeat).isSuccess)
 
-        // 3. Verified Trip Controls (createVehicleDataArray: 0x00=Trip A, 0x01=Trip B, 0x02=Reset)
+        // 3. Verified Trip Controls & Vehicle RTC Sync (createVehicleDataArray: 0x00=Trip A, 0x01=Trip B, 0x02=Reset)
         val switchTripA = dispatcher.buildTripControlFrame(IqubeBleSpec.SUBCMD_SWITCH_TRIP_A)
         val switchTripB = dispatcher.buildTripControlFrame(IqubeBleSpec.SUBCMD_SWITCH_TRIP_B)
         val resetActive = dispatcher.buildTripControlFrame(IqubeBleSpec.SUBCMD_RESET_ACTIVE_TRIP)
@@ -171,6 +179,9 @@ class ExampleUnitTest {
         assertEquals(0x00.toByte(), switchTripA[12])
         assertEquals(0x02.toByte(), switchTripA[5])
         assertEquals(0x01.toByte(), switchTripA[14])
+        assertTrue(switchTripA[6] in 0..23) // Local HOUR_OF_DAY
+        assertTrue(switchTripA[7] in 0..59) // Local MINUTE
+        assertTrue(switchTripA[8] in 0..59) // Local SECOND
         assertEquals(0xFF.toByte(), switchTripA[19])
         assertEquals(0xFF.toByte(), switchTripB[19])
         assertEquals(0xFF.toByte(), resetActive[19])
@@ -186,7 +197,7 @@ class ExampleUnitTest {
         assertEquals(0xFF.toByte(), locationPkt[19])
         assertTrue(dispatcher.validateOutgoingFrame(locationPkt).isSuccess)
 
-        // 5. Dedicated Caller ID Packet (0x5B 0x43 + "Rahul" + 0xFF) & Call State (0x5B 0x5D 0x43 0x00 ... 0xFF)
+        // 5. Dedicated Caller ID Packet (0x5B 0x43 + "Rahul" + 0xFF) & Incoming/Outgoing/Missed Call States (0x5B 0x5D 0x43)
         val callPkt = dispatcher.buildCallerPacket0x43("Rahul Sharma")
         assertEquals(0x5B.toByte(), callPkt[0])
         assertEquals(0x43.toByte(), callPkt[1])
@@ -194,6 +205,10 @@ class ExampleUnitTest {
         assertEquals("Rahul", callText)
         assertEquals(0xFF.toByte(), callPkt[19])
         assertTrue(dispatcher.validateOutgoingFrame(callPkt).isSuccess)
+
+        val missedBannerPkt = dispatcher.buildCallerPacket0x43("Miss: Rahul", extractFirstWordOnly = false)
+        assertEquals("Miss: Rahul", String(missedBannerPkt, 2, 11, StandardCharsets.US_ASCII))
+        assertTrue(dispatcher.validateOutgoingFrame(missedBannerPkt).isSuccess)
 
         val callStatePkt = dispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_RINGING)
         assertEquals(0x5B.toByte(), callStatePkt[0])
@@ -203,7 +218,12 @@ class ExampleUnitTest {
         assertEquals(0xFF.toByte(), callStatePkt[19])
         assertTrue(dispatcher.validateOutgoingFrame(callStatePkt).isSuccess)
 
-        // 6. Turn-by-Turn Navigation 2-Packet Sequence (0x5B 0x49 + 0x5B 0x4E) with auto m/km scaling + ETA
+        val missedStatePkt = dispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_MISSED)
+        assertEquals(0x03.toByte(), missedStatePkt[3])
+        val outgoingStatePkt = dispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_OUTGOING)
+        assertEquals(0x04.toByte(), outgoingStatePkt[3])
+
+        // 6. Turn-by-Turn Navigation 2-Packet Sequence (0x5B 0x49 + 0x5B 0x4E) with auto m/km scaling + ETA + active flag
         val navPkt1Meters = dispatcher.buildNavigationManeuverPacket1(TurnTypeConstant.TURN_RIGHT.code, 250, 0x01, etaMinutes = 75)
         assertEquals(0x5B.toByte(), navPkt1Meters[0])
         assertEquals(0x49.toByte(), navPkt1Meters[1])
@@ -213,6 +233,7 @@ class ExampleUnitTest {
         assertEquals(0x01.toByte(), navPkt1Meters[5]) // Meters
         assertEquals(1.toByte(), navPkt1Meters[6])    // ETA Hours (75 / 60 = 1)
         assertEquals(15.toByte(), navPkt1Meters[7])   // ETA Mins (75 % 60 = 15)
+        assertEquals(0x01.toByte(), navPkt1Meters[8]) // Nav Active Flag
         assertEquals(0xFF.toByte(), navPkt1Meters[19])
         assertTrue(dispatcher.validateOutgoingFrame(navPkt1Meters).isSuccess)
 

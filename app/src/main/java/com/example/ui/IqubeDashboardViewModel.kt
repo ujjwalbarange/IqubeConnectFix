@@ -139,9 +139,17 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
         bleManager.setAutoLocationSyncEnabled(enabled)
     }
 
-    // Dedicated Caller ID Banner (`0x5B 0x43` + 500ms repeat timer)
+    // Dedicated Caller ID Banner (`0x5B 0x43` + 500ms repeat timer) & Outgoing/Missed Call Relays
     fun triggerIncomingCallAlert(fullCallerName: String) {
         bleManager.triggerIncomingCallAlert(fullCallerName)
+    }
+
+    fun triggerOutgoingCallAlert(fullCallerName: String) {
+        bleManager.triggerOutgoingCallAlert(fullCallerName)
+    }
+
+    fun triggerMissedCallAlert(fullCallerName: String) {
+        bleManager.triggerMissedCallAlert(fullCallerName)
     }
 
     fun endIncomingCallAlert() {

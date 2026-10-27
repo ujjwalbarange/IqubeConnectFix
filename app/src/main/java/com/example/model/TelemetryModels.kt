@@ -53,10 +53,23 @@ object IqubeBleSpec {
     const val SUBCMD_SWITCH_TRIP_B: Byte = 0x01
     const val SUBCMD_RESET_ACTIVE_TRIP: Byte = 0x02
 
-    // Call State Bytes for writeCallStateForIQube
+    // Call State Bytes for writeCallStateForIQube (0x5B 0x5D 0x43 <state>)
     const val CALL_STATE_RINGING: Byte = 0x00
     const val CALL_STATE_ANSWERED: Byte = 0x01
     const val CALL_STATE_ENDED: Byte = 0x02
+    const val CALL_STATE_MISSED: Byte = 0x03
+    const val CALL_STATE_OUTGOING: Byte = 0x04
+
+    fun computePhoneBatteryBars(batteryPct: Int): Int {
+        val pct = batteryPct.coerceIn(0, 100)
+        return when {
+            pct <= 10 -> 0
+            pct <= 30 -> 1
+            pct <= 55 -> 2
+            pct <= 80 -> 3
+            else -> 4
+        }
+    }
 
     // Navigation Unit Bytes for 0x5B 0x49 (Byte 5)
     const val NAV_UNIT_METERS: Byte = 0x01
@@ -179,7 +192,10 @@ data class PhoneStatusState(
     val signalBars: Int = 4,
     val lastPhoneStatusSyncMs: Long? = null,
     val lastClockSyncMs: Long? = null
-)
+) {
+    val phoneBatteryBars: Int
+        get() = IqubeBleSpec.computePhoneBatteryBars(phoneBatteryPct)
+}
 
 enum class BleConnectionPhase {
     DISCONNECTED,

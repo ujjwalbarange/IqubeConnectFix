@@ -98,7 +98,7 @@ class IqubeCommandDispatcher(
         // - [b  (0x5B, 0x62, ...17B UTF-8, 0xFF): Music Track Title Banner (SONG_NAME_PACKET)
         if (b0 == IqubeBleSpec.HEADER_ASCII_CMD) {
             val isRiderOrStatus52 = b1 == IqubeBleSpec.DATA_ID_HANDSHAKE_52                  // [RU or [R <riderName>
-            val isHeartbeat = b1 == IqubeBleSpec.DATA_ID_HEARTBEAT_4A && b2 == 0x44.toByte() // [JD
+            val isHeartbeat = b1 == IqubeBleSpec.DATA_ID_HEARTBEAT_4A                        // [J (0x5B 0x4A status/clock sync)
             val isLocation = b1 == IqubeBleSpec.DATA_ID_LOCATION_5C                          // [\
             val isCaller43 = b1 == IqubeBleSpec.DATA_ID_CALLER_43                            // [C (0x5B 0x43)
             val isCallState5D = b1 == IqubeBleSpec.DATA_ID_CALL_STATE_5D && b2 == 0x43.toByte() // []C
@@ -110,7 +110,7 @@ class IqubeCommandDispatcher(
                 return Result.success(payload.copyOf())
             }
             return Result.failure(
-                IllegalArgumentException("Unrecognized 0x5B header. Allowed: [RU/[R (5B 52), [JD (5B 4A 44), [\\ (5B 5C), [C (5B 43), []C (5B 5D 43), [I (5B 49), [N (5B 4E), or [b (5B 62).")
+                IllegalArgumentException("Unrecognized 0x5B header. Allowed: [RU/[R (5B 52), [J (5B 4A), [\\ (5B 5C), [C (5B 43), []C (5B 5D 43), [I (5B 49), [N (5B 4E), or [b (5B 62).")
             )
         }
 
@@ -138,29 +138,45 @@ class IqubeCommandDispatcher(
 
     /**
      * 1B. Phone Battery & Network Status Bar Relay (`0x5B 0x52 0x55` / `buildPhoneStatusPacket`):
-     *     `[0x5B, 0x52, 0x55, batteryPct, signalBars, 0x01, 0, ..., 0, 0xFF]`
+     *     Maps `batteryPct` (0..100%) to `batteryBars` (0..4 bars: e.g. 20% -> 1 bar) so the cluster
+     *     top tray never shows 4/4 bars when the phone is at 20% battery.
      */
     fun buildPhoneStatusPacket(batteryPct: Int = 85, signalBars: Int = 4): ByteArray {
         val p = ByteArray(IqubeBleSpec.STANDARD_FRAME_SIZE)
+        val clampedPct = batteryPct.coerceIn(0, 100)
+        val batteryBars = IqubeBleSpec.computePhoneBatteryBars(clampedPct)
         p[0] = 0x5B // '['
         p[1] = 0x52 // 'R'
         p[2] = 0x55 // 'U'
-        p[3] = (batteryPct.coerceIn(0, 100) and 0xFF).toByte() // Phone battery %
-        p[4] = (signalBars.coerceIn(0, 4) and 0xFF).toByte()   // Cellular signal bars (0..4)
-        p[5] = 0x01                                            // Bluetooth connected indicator
+        p[3] = (clampedPct and 0xFF).toByte()                  // Phone battery % (0..100)
+        p[4] = (batteryBars and 0xFF).toByte()                 // Phone battery bars (0..4 bars, e.g. 1 bar at 20%)
+        p[5] = 0x01                                            // Bluetooth connected & network active
+        p[6] = (signalBars.coerceIn(0, 4) and 0xFF).toByte()   // Cellular signal bars (0..4)
         p[19] = IqubeBleSpec.FOOTER_DELIMITER                  // 0xFF
         return p
     }
 
     /**
-     * 2. Clock & Date Synchronization (`0x5B 0x4A 0x44` — `buildClockSyncPacket` / `buildHeartbeatSyncFrame`):
-     *    `[0x5B, 0x4A, 0x44, hours, minutes, seconds, 0x01, day, month, year%100, 0, ..., 0, 0xFF]`
+     * 2. Clock, Date & Mobile Status Synchronization (`0x5B 0x4A` — `buildClockSyncPacket`):
+     *    Encodes `Byte [2]` as `((batteryBars << 4) | signalBars)` (or `0x44` when 4/4 bars, `0x14` / `0x41` at 20%),
+     *    followed by 24-hour local time (`hours, minutes, seconds, 0x01, day, month, year%100`) and `batteryBars`.
      */
-    fun buildClockSyncPacket(cal: Calendar = Calendar.getInstance()): ByteArray {
+    fun buildClockSyncPacket(
+        cal: Calendar = Calendar.getInstance(),
+        batteryPct: Int? = null,
+        signalBars: Int = 4
+    ): ByteArray {
         val p = ByteArray(IqubeBleSpec.STANDARD_FRAME_SIZE)
+        val battBars = if (batteryPct != null) {
+            IqubeBleSpec.computePhoneBatteryBars(batteryPct)
+        } else {
+            4
+        }
+        val sigBars = signalBars.coerceIn(0, 4)
         p[0] = 0x5B // '['
         p[1] = 0x4A // 'J'
-        p[2] = 0x44 // 'D'
+        // Packed status byte: when battBars=4 and sigBars=4, this is 0x44 ('D'); at 20% (1 bar), 0x14
+        p[2] = (((battBars and 0x0F) shl 4) or (sigBars and 0x0F)).toByte()
         p[3] = (cal.get(Calendar.HOUR_OF_DAY) and 0xFF).toByte()   // Hours (0..23)
         p[4] = (cal.get(Calendar.MINUTE) and 0xFF).toByte()        // Minutes (0..59)
         p[5] = (cal.get(Calendar.SECOND) and 0xFF).toByte()        // Seconds (0..59)
@@ -168,6 +184,8 @@ class IqubeCommandDispatcher(
         p[7] = (cal.get(Calendar.DAY_OF_MONTH) and 0xFF).toByte()  // Day (1..31)
         p[8] = ((cal.get(Calendar.MONTH) + 1) and 0xFF).toByte()   // Month (1..12)
         p[9] = ((cal.get(Calendar.YEAR) % 100) and 0xFF).toByte()  // 2-digit Year
+        p[10] = ((batteryPct ?: 85).coerceIn(0, 100) and 0xFF).toByte()
+        p[11] = (battBars and 0xFF).toByte()
         p[19] = IqubeBleSpec.FOOTER_DELIMITER                      // 0xFF
         return p
     }
@@ -193,26 +211,27 @@ class IqubeCommandDispatcher(
     }
 
     /**
-     * 4. Trip Switch & Reset Controller (`0x5A 0xF1` / `createVehicleDataArray` / `buildTripPacket`):
-     *    - `tripVal = 0x00`: Switch to Trip A
-     *    - `tripVal = 0x01`: Switch to Trip B
-     *    - `tripVal = 0x02`: Reset Active Trip
-     *    Includes `p[5] = 0x02` mode control, `p[9..11]` = Day/Month/2-digit Year, `p[12] = tripVal`, `p[14] = 0x01`, `p[19] = 0xFF`.
+     * 4. Trip Switch, Reset & RTC Time/Date Controller (`0x5A 0xF1` / `createVehicleDataArray`):
+     *    - `tripVal = 0x00`: Switch to Trip A + Sync RTC Clock/Date
+     *    - `tripVal = 0x01`: Switch to Trip B + Sync RTC Clock/Date
+     *    - `tripVal = 0x02`: Reset Active Trip + Sync RTC Clock/Date
+     *    Populates `p[6..8]` with local `HOUR_OF_DAY`, `MINUTE`, `SECOND` and `p[9..11]` with `DAY`, `MONTH`, `YEAR%100`
+     *    so the scooter cluster RTC synchronizes instead of resetting to `01:10 AM`.
      */
     fun buildTripControlFrame(tripVal: Byte, calendar: Calendar = Calendar.getInstance()): ByteArray {
         val p = ByteArray(IqubeBleSpec.STANDARD_FRAME_SIZE)
         p[0] = IqubeBleSpec.HEADER_TELEMETRY // 0x5A
-        p[1] = 0xF1.toByte()                 // Trip & Vehicle Data Opcode
+        p[1] = 0xF1.toByte()                 // Trip & Vehicle RTC Data Opcode
         p[2] = 0x00
         p[3] = tripVal                       // 0x00=Trip A, 0x01=Trip B, 0x02=Reset Active
         p[4] = 0x00
         p[5] = 0x02                          // Mode control
-        p[6] = 0x00
-        p[7] = 0x00
-        p[8] = 0x00
-        p[9] = calendar.get(Calendar.DAY_OF_MONTH).toByte()       // Day (1..31)
-        p[10] = (calendar.get(Calendar.MONTH) + 1).toByte()       // Month (1..12)
-        p[11] = (calendar.get(Calendar.YEAR) % 100).toByte()      // 2-digit Year (e.g. 26)
+        p[6] = (calendar.get(Calendar.HOUR_OF_DAY) and 0xFF).toByte() // Local Hours (0..23)
+        p[7] = (calendar.get(Calendar.MINUTE) and 0xFF).toByte()      // Local Minutes (0..59)
+        p[8] = (calendar.get(Calendar.SECOND) and 0xFF).toByte()      // Local Seconds (0..59)
+        p[9] = calendar.get(Calendar.DAY_OF_MONTH).toByte()           // Day (1..31)
+        p[10] = (calendar.get(Calendar.MONTH) + 1).toByte()           // Month (1..12)
+        p[11] = (calendar.get(Calendar.YEAR) % 100).toByte()          // 2-digit Year (e.g. 26)
         p[12] = tripVal
         p[13] = 0x00
         p[14] = 0x01
@@ -225,19 +244,23 @@ class IqubeCommandDispatcher(
     }
 
     /**
-     * 5A. Dedicated Caller ID Banner (`0x5B 0x43` / `createMobileToClusterArray` / `buildCallerPacket`):
-     *     Extracts caller's 1st Name (up to 17 chars) into `[0x5B, 0x43, ...utf8(firstName.slice(0, 17)), ...0x00, 0xFF]`.
+     * 5A. Dedicated Caller ID / Banner Text (`0x5B 0x43` / `createMobileToClusterArray`):
+     *     When `extractFirstWordOnly = true`, extracts caller's 1st Name; when `false`, preserves full banner text up to 17 chars.
      */
-    fun buildCallerPacket0x43(fullOrFirstName: String): ByteArray {
+    fun buildCallerPacket0x43(fullOrFirstName: String, extractFirstWordOnly: Boolean = true): ByteArray {
         val p = ByteArray(IqubeBleSpec.STANDARD_FRAME_SIZE)
         p[0] = 0x5B // '['
         p[1] = IqubeBleSpec.DATA_ID_CALLER_43 // 0x43 ('C') — DATA_ID_CALLER_43
-        val firstName = fullOrFirstName.trim()
-            .split(Regex("\\s+"))
-            .firstOrNull()
-            ?.replace(Regex("[^\\x20-\\x7E]"), "")
-            ?.ifBlank { "Caller" } ?: "Caller"
-        val nameBytes = firstName.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES).toByteArray(StandardCharsets.UTF_8)
+        val cleanText = if (extractFirstWordOnly) {
+            fullOrFirstName.trim()
+                .split(Regex("\\s+"))
+                .firstOrNull()
+                ?.replace(Regex("[^\\x20-\\x7E]"), "")
+                ?.ifBlank { "Caller" } ?: "Caller"
+        } else {
+            fullOrFirstName.replace(Regex("[^\\x20-\\x7E]"), "").trim().ifBlank { "Banner" }
+        }
+        val nameBytes = cleanText.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES).toByteArray(StandardCharsets.UTF_8)
         System.arraycopy(nameBytes, 0, p, 2, minOf(nameBytes.size, IqubeBleSpec.MAX_LOCATION_ASCII_BYTES))
         p[19] = IqubeBleSpec.FOOTER_DELIMITER // 0xFF mandatory trailer
         return p
@@ -245,16 +268,18 @@ class IqubeCommandDispatcher(
 
     /**
      * 5B. Call State Frame (`writeCallStateForIQube`):
-     *     - `0x00` = Ringing (illuminates phone call icon in top tray)
-     *     - `0x01` = Answered
-     *     - `0x02` = Ended
+     *     - `0x00` = Incoming Call (Ringing)
+     *     - `0x01` = Answered / Ongoing Call
+     *     - `0x02` = Call Ended
+     *     - `0x03` = Missed Call
+     *     - `0x04` = Outgoing Call
      */
     fun buildCallStatePacket(callStateByte: Byte, firstName: String = ""): ByteArray {
         val frame = ByteArray(IqubeBleSpec.STANDARD_FRAME_SIZE)
         frame[0] = 0x5B // '['
         frame[1] = IqubeBleSpec.DATA_ID_CALL_STATE_5D // 0x5D (']')
         frame[2] = 0x43 // 'C'
-        frame[3] = callStateByte // 0x00=Ringing, 0x01=Answered, 0x02=Ended
+        frame[3] = callStateByte
         if (firstName.isNotBlank()) {
             val cleanAscii = firstName.replace(Regex("[^\\x20-\\x7E]"), "").trim().take(15)
             val asciiBytes = cleanAscii.toByteArray(StandardCharsets.UTF_8)
@@ -266,10 +291,6 @@ class IqubeCommandDispatcher(
 
     /**
      * 6A. Turn-by-Turn Navigation Packet 1 (Maneuver, Distance & ETA Frame — `0x5B 0x49`):
-     *     - `p[2] = turnCode` (`0x00..0x48` from `TurnTypeConstants.smali`)
-     *     - Automatic `m` (`0x01`) vs `0.1 km` (`0x02`) scaling when `unitByte == 0x01 && distanceValue >= 1000`
-     *     - `p[6] = (etaMinutes / 60)` (ETA hours), `p[7] = (etaMinutes % 60)` (ETA minutes)
-     *     - `p[19] = 0xFF`
      */
     fun buildNavigationManeuverPacket1(
         turnCode: Int,
@@ -298,16 +319,13 @@ class IqubeCommandDispatcher(
         val safeEta = max(0, etaMinutes)
         p[6] = ((safeEta / 60) and 0xFF).toByte() // ETA Hours
         p[7] = ((safeEta % 60) and 0xFF).toByte() // ETA Minutes
-        p[19] = IqubeBleSpec.FOOTER_DELIMITER // 0xFF mandatory trailer
+        p[8] = 0x01                               // Navigation active flag
+        p[19] = IqubeBleSpec.FOOTER_DELIMITER     // 0xFF mandatory trailer
         return p
     }
 
     /**
      * 6B. Turn-by-Turn Navigation Packet 2 (Street Name / Destination Reached Frame — `0x5B 0x4E`):
-     *     - Standard (`createNavigationAssistArray`):
-     *       `[0x5B, 0x4E, 0x4E, 0x41, ...utf8(streetName.slice(0, 15)), ...paddingZeros, 0xFF]`
-     *     - Destination Reached (`turnCode == 0x08`, `createDestReachedArray`):
-     *       `[0x5B, 0x4E, 0x00, 0x00, ...utf8(destName.slice(0, 15)), ...paddingZeros, 0xFF]`
      */
     fun buildNavigationStreetPacket2(
         turnCode: Int,
@@ -317,11 +335,9 @@ class IqubeCommandDispatcher(
         p[0] = 0x5B // '['
         p[1] = IqubeBleSpec.DATA_ID_NAV_ASSIST_4E // 0x4E ('N')
         if ((turnCode and 0xFF) == 0x08) {
-            // Destination Reached (createDestReachedArray): Bytes 2..3 = 0x00, 0x00
             p[2] = 0x00
             p[3] = 0x00
         } else {
-            // Navigation Assist Street Name (createNavigationAssistArray): Bytes 2..3 = 0x4E ('N'), 0x41 ('A')
             p[2] = 0x4E // 'N'
             p[3] = 0x41 // 'A'
         }

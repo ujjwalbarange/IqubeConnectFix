@@ -220,6 +220,8 @@ fun IqubeCompanionApp(
                                     onCustomLocationOverrideChange = viewModel::setCustomLocationOverride,
                                     onSetAutoLocationSync = viewModel::setAutoLocationSyncEnabled,
                                     onTriggerIncomingCallClick = viewModel::triggerIncomingCallAlert,
+                                    onTriggerOutgoingCallClick = viewModel::triggerOutgoingCallAlert,
+                                    onTriggerMissedCallClick = viewModel::triggerMissedCallAlert,
                                     onEndIncomingCallClick = { viewModel.endIncomingCallAlert() },
                                     onSendNavigationManeuver = viewModel::sendNavigationManeuver,
                                     onToggleNavigationRouteSim = viewModel::toggleNavigationRouteSimulation,

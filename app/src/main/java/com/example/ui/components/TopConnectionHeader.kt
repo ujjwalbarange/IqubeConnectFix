@@ -333,7 +333,7 @@ fun TopConnectionHeader(
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Phone [RU: ${phoneStatusState.phoneBatteryPct}% • ${phoneStatusState.signalBars}/4 Bars",
+                    text = "Phone [RU: ${phoneStatusState.phoneBatteryPct}% • ${phoneStatusState.phoneBatteryBars}/4 Bars",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = ElectricCyan,

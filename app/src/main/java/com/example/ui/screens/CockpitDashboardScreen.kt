@@ -136,6 +136,8 @@ fun CockpitDashboardScreen(
     onCustomLocationOverrideChange: (String) -> Unit,
     onSetAutoLocationSync: (Boolean) -> Unit,
     onTriggerIncomingCallClick: (String) -> Unit,
+    onTriggerOutgoingCallClick: (String) -> Unit = {},
+    onTriggerMissedCallClick: (String) -> Unit = {},
     onEndIncomingCallClick: () -> Unit,
     onSendNavigationManeuver: (TurnTypeConstant, Int, Byte, String, Int) -> Unit,
     onToggleNavigationRouteSim: () -> Unit,
@@ -169,19 +171,12 @@ fun CockpitDashboardScreen(
                 .widthIn(max = 680.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 0A. ACTIVE INCOMING CALL BANNER (When Ringing on Cluster 0x5B 0x43)
+            // 0A. ACTIVE INCOMING / OUTGOING CALL BANNER (When Active on Cluster 0x5B 0x43)
             AnimatedVisibility(visible = incomingCallState.isRinging) {
                 IncomingCallActiveBanner(
                     incomingCallState = incomingCallState,
                     topLocalityName = lastSyncedClusterLocation ?: detectedLocalityName,
                     onEndCallClick = onEndIncomingCallClick
-                )
-            }
-
-            // 0B. HANDLEBAR MEDIA SWITCH EVENT TOAST BANNER (When rider presses 0x5A 0x6B switches)
-            AnimatedVisibility(visible = mediaPlayerState.lastHandlebarCommand != null) {
-                HandlebarMediaEventToastBanner(
-                    mediaPlayerState = mediaPlayerState
                 )
             }
 
@@ -253,11 +248,13 @@ fun CockpitDashboardScreen(
                 onDumpLocationNowClick = onDumpLocationToClusterClick
             )
 
-            // 7. DEDICATED CALLER ID BANNER RELAY (`0x5B 0x43` + 500ms repeat timer & `0x5B 0x5D 0x43`)
+            // 7. CALL TEST RELAY (Incoming Call `0x00`, Outgoing Call `0x04`, Missed Call `0x03`, End Call `0x02`)
             IncomingCallClusterRelayCard(
                 incomingCallState = incomingCallState,
                 detectedLocalityName = detectedLocalityName,
                 onTriggerCall = onTriggerIncomingCallClick,
+                onTriggerOutgoingCall = onTriggerOutgoingCallClick,
+                onTriggerMissedCall = onTriggerMissedCallClick,
                 onEndCall = onEndIncomingCallClick
             )
 
@@ -1834,11 +1831,14 @@ private fun TurnByTurnNavigationInjectorCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun IncomingCallClusterRelayCard(
     incomingCallState: IncomingCallRelayState,
     detectedLocalityName: String,
     onTriggerCall: (String) -> Unit,
+    onTriggerOutgoingCall: (String) -> Unit,
+    onTriggerMissedCall: (String) -> Unit,
     onEndCall: () -> Unit
 ) {
     var callerInput by remember { mutableStateOf(incomingCallState.fullCallerName) }
@@ -1871,19 +1871,19 @@ private fun IncomingCallClusterRelayCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Default.Call,
-                    contentDescription = "Dedicated Caller ID Banner Relay",
+                    contentDescription = "Call & Alert Banner Relay",
                     tint = AmberWarning,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Column {
                     Text(
-                        text = "DEDICATED CALLER ID BANNER (0x5B 0x43 + 500ms REPEAT TIMER)",
+                        text = "CALL RELAY TESTER (INCOMING 0x00 • OUTGOING 0x04 • MISSED 0x03)",
                         style = MaterialTheme.typography.labelMedium,
                         color = AmberWarning
                     )
                     Text(
-                        text = "Sends [0x5B, 0x43, \"$previewClusterText\", 0xFF] + CallState 0x00 (Ringing) every 500ms • Restores \"$detectedLocalityName\" on end",
+                        text = "Active Banner: \"${incomingCallState.clusterFormattedText}\" (State 0x${String.format("%02X", incomingCallState.callStateByte)}) • Restores \"$detectedLocalityName\" on End",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextSecondary
                     )
@@ -1894,7 +1894,7 @@ private fun IncomingCallClusterRelayCard(
         OutlinedTextField(
             value = callerInput,
             onValueChange = { callerInput = it },
-            label = { Text("Caller Full Name (Extracts 1st Name: '$extractedFirst' → 0x5B 0x43 '$previewClusterText')") },
+            label = { Text("Caller Name (Incoming: '$previewClusterText' • Outgoing: 'Call: $previewClusterText' • Missed: 'Miss: $previewClusterText')") },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
@@ -1903,7 +1903,7 @@ private fun IncomingCallClusterRelayCard(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
                 onClick = { onTriggerCall(callerInput) },
@@ -1912,31 +1912,66 @@ private fun IncomingCallClusterRelayCard(
                     .weight(1f)
                     .testTag("trigger_call_alert_button")
             ) {
-                Icon(Icons.Default.Call, contentDescription = "Ring Cluster", modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
+                Icon(Icons.Default.Call, contentDescription = "Incoming Call", modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Ring 0x5B 0x43 (\"$previewClusterText\")",
-                    style = MaterialTheme.typography.labelLarge,
+                    text = "Incoming (\"$previewClusterText\")",
+                    style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
 
-            if (incomingCallState.isRinging) {
-                Button(
-                    onClick = onEndCall,
-                    colors = ButtonDefaults.buttonColors(containerColor = EnergeticCoral, contentColor = SlateSurface),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("end_call_alert_button")
-                ) {
-                    Icon(Icons.Default.CallEnd, contentDescription = "End Call", modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "End Call (0x02 & Restore GPS)",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+            Button(
+                onClick = { onTriggerOutgoingCall(callerInput) },
+                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = SlateSurface),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("trigger_outgoing_call_button")
+            ) {
+                Icon(Icons.Default.Call, contentDescription = "Outgoing Call", modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Outgoing (\"Call: $previewClusterText\")",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { onTriggerMissedCall(callerInput) },
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("trigger_missed_call_button")
+            ) {
+                Icon(Icons.Default.CallEnd, contentDescription = "Missed Call", tint = EnergeticCoral, modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Test Missed Call (\"Miss: $previewClusterText\")",
+                    color = EnergeticCoral,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Button(
+                onClick = onEndCall,
+                colors = ButtonDefaults.buttonColors(containerColor = EnergeticCoral, contentColor = SlateSurface),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("end_call_alert_button")
+            ) {
+                Icon(Icons.Default.CallEnd, contentDescription = "End Call", modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "End / Clear Call (0x02)",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }
@@ -2012,10 +2047,11 @@ private fun ClusterMusicAndRiderGreetingCard(
     var songInput by remember(mediaPlayerState.trackTitle, musicTrackTitle) {
         mutableStateOf(mediaPlayerState.trackTitle.ifBlank { musicTrackTitle })
     }
-    var artistInput by remember(mediaPlayerState.artistName) { mutableStateOf(mediaPlayerState.artistName) }
     var batterySliderVal by remember(phoneStatusState.phoneBatteryPct) {
         mutableFloatStateOf(phoneStatusState.phoneBatteryPct.toFloat())
     }
+    val livePct = batterySliderVal.roundToInt()
+    val liveBars = IqubeBleSpec.computePhoneBatteryBars(livePct)
 
     val lastClockStr = remember(phoneStatusState.lastClockSyncMs) {
         phoneStatusState.lastClockSyncMs?.let {
@@ -2033,115 +2069,65 @@ private fun ClusterMusicAndRiderGreetingCard(
             .testTag("music_rider_greeting_card"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Section A: Media / Music Track Banner (0x5B 0x62) & Handlebar Controls (0x5A 0x6B)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "MEDIA TRACK BANNER (0x5B 0x62) & HANDLEBAR CONTROLS (0x5A 0x6B)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = NeonMint
-                )
-                Text(
-                    text = "Status: ${if (mediaPlayerState.isPlaying) "PLAYING" else "PAUSED (Restores Locality/Caller)"} • Vol ${mediaPlayerState.volumePercent}%",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
-                )
-            }
+        // Section A: Simple Song Name in Cluster Banner (0x5B 0x62 + 0x5B 0x5C + 0x5B 0x43)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = "SIMPLE SONG NAME IN CLUSTER BANNER (0x5B 0x62 • 0x5B 0x5C • 0x5B 0x43)",
+                style = MaterialTheme.typography.labelMedium,
+                color = NeonMint
+            )
+            Text(
+                text = "Displays simple song title text directly in the cluster banner (up to 17 ASCII chars)",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
         }
+
+        OutlinedTextField(
+            value = songInput,
+            onValueChange = { songInput = it.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES) },
+            label = { Text("Simple Song Name in Banner (max 17 chars, e.g. \"Midnight City\")") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("music_track_input")
+        )
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedTextField(
-                value = songInput,
-                onValueChange = { songInput = it.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES) },
-                label = { Text("Track Title (17B → 0x5B 0x62)") },
-                singleLine = true,
+            Button(
+                onClick = { onSendMusicTrackClick(songInput, "", true) },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonMint, contentColor = SlateSurface),
                 modifier = Modifier
                     .weight(1.2f)
-                    .testTag("music_track_input")
-            )
-            OutlinedTextField(
-                value = artistInput,
-                onValueChange = { artistInput = it.take(20) },
-                label = { Text("Artist") },
-                singleLine = true,
-                modifier = Modifier.weight(0.8f)
-            )
-            Button(
-                onClick = { onSendMusicTrackClick(songInput, artistInput, true) },
-                colors = ButtonDefaults.buttonColors(containerColor = NeonMint, contentColor = SlateSurface),
-                modifier = Modifier.testTag("send_music_track_button")
+                    .testTag("send_music_track_button")
             ) {
-                Text("Push Song", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            }
-        }
-
-        // Handlebar Media Key Controls (Simulates incoming 0x5A 0x6B Byte[2] = 0x00..0x06)
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            OutlinedButton(
-                onClick = { onSimulateHandlebarKeyClick(MusicCommand.PREVIOUS_TRACK) },
-                modifier = Modifier.testTag("handlebar_prev_button")
-            ) {
-                Icon(Icons.Default.SkipPrevious, contentDescription = "Previous", tint = ElectricCyan, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Prev (0x04)", color = ElectricCyan, style = MaterialTheme.typography.labelSmall)
-            }
-            OutlinedButton(
-                onClick = { onSimulateHandlebarKeyClick(MusicCommand.PLAY_PAUSE_TOGGLE) },
-                modifier = Modifier.testTag("handlebar_play_pause_button")
-            ) {
-                Icon(
-                    imageVector = if (mediaPlayerState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = "Play/Pause",
-                    tint = NeonMint,
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Show Song Name in Banner", modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (mediaPlayerState.isPlaying) "Pause (0x01)" else "Play (0x00)",
-                    color = NeonMint,
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "Show Song in Banner (\"${songInput.take(17)}\")",
+                    style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
             OutlinedButton(
-                onClick = { onSimulateHandlebarKeyClick(MusicCommand.NEXT_TRACK) },
-                modifier = Modifier.testTag("handlebar_next_button")
+                onClick = { onSendMusicTrackClick(songInput, "", false) },
+                modifier = Modifier
+                    .weight(0.8f)
+                    .testTag("clear_music_banner_button")
             ) {
-                Icon(Icons.Default.SkipNext, contentDescription = "Next", tint = ElectricCyan, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Next (0x03)", color = ElectricCyan, style = MaterialTheme.typography.labelSmall)
-            }
-            OutlinedButton(
-                onClick = { onSimulateHandlebarKeyClick(MusicCommand.VOLUME_DOWN) },
-                modifier = Modifier.testTag("handlebar_vol_down_button")
-            ) {
-                Icon(Icons.AutoMirrored.Filled.VolumeDown, contentDescription = "Vol-", tint = AmberWarning, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Vol- (0x06)", color = AmberWarning, style = MaterialTheme.typography.labelSmall)
-            }
-            OutlinedButton(
-                onClick = { onSimulateHandlebarKeyClick(MusicCommand.VOLUME_UP) },
-                modifier = Modifier.testTag("handlebar_vol_up_button")
-            ) {
-                Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Vol+", tint = AmberWarning, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Vol+ (0x05)", color = AmberWarning, style = MaterialTheme.typography.labelSmall)
+                Text(
+                    text = "Restore Location",
+                    color = ElectricCyan,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
 
-        // Section B: Phone Battery & Status Tray Sync (0x5B 0x52 0x55) + Local 24h Clock Sync (0x5B 0x4A 0x44)
+        // Section B: Phone Battery & Status Tray Sync (0x5B 0x52 0x55 & 0x5B 0x4A) + Local 24h Clock & RTC Sync (0x5A 0xF1)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2150,23 +2136,45 @@ private fun ClusterMusicAndRiderGreetingCard(
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
+            Text(
+                text = "PHONE BATTERY BARS (0x5B 0x52 0x55 & 0x5B 0x4A) & 24H CLOCK / RTC SYNC (0x5A 0xF1)",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = ElectricCyan
+            )
+            Text(
+                text = "Phone Battery: $livePct% → $liveBars/4 Bars (20% = 1/4 Bar)  |  Cluster Clock: Synced ($lastClockStr)",
+                style = MaterialTheme.typography.labelSmall,
+                color = NeonMint
+            )
+
+            // Quick Battery Bar Test Chips (20% = 1/4, 45% = 2/4, 70% = 3/4, 90% = 4/4)
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "PHONE BATTERY TRAY (0x5B 0x52 0x55) & 24H CLOCK SYNC (0x5B 0x4A 0x44)",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = ElectricCyan
-                    )
-                    Text(
-                        text = "Phone: ${phoneStatusState.phoneBatteryPct}% • ${phoneStatusState.signalBars}/4 Bars  |  Cluster Clock: Synced ($lastClockStr)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = NeonMint
-                    )
+                listOf(10 to "10% (0/4)", 20 to "20% (1/4)", 45 to "45% (2/4)", 70 to "70% (3/4)", 90 to "90% (4/4)").forEach { (pct, label) ->
+                    val isSelected = livePct == pct
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) ElectricCyan.copy(alpha = 0.22f) else SlateSurface)
+                            .border(1.dp, if (isSelected) ElectricCyan else SlateBorder, RoundedCornerShape(8.dp))
+                            .clickable {
+                                batterySliderVal = pct.toFloat()
+                                onSetPhoneBatteryOverride(pct)
+                            }
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                            .testTag("battery_preset_chip_$pct")
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) ElectricCyan else TextPrimary
+                        )
+                    }
                 }
             }
 
@@ -2199,7 +2207,7 @@ private fun ClusterMusicAndRiderGreetingCard(
                         .testTag("sync_phone_status_button")
                 ) {
                     Text(
-                        text = "Sync Phone [RU (${batterySliderVal.roundToInt()}%)",
+                        text = "Sync Phone ($livePct% • $liveBars/4 Bars)",
                         color = NeonMint,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold
@@ -2214,7 +2222,7 @@ private fun ClusterMusicAndRiderGreetingCard(
                     Icon(Icons.Default.AccessTime, contentDescription = "Sync Clock", tint = ElectricCyan, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Sync 24h Clock [JD",
+                        text = "Sync 24h Clock Now",
                         color = ElectricCyan,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold

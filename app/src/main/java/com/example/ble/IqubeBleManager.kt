@@ -413,8 +413,10 @@ class IqubeBleManager(
                 _detectedLocalityName.value = locality
 
                 val isConnected = isActivelyConnectedOrReplaying()
-                // Only auto-push GPS locality when no incoming call is actively ringing on the cluster
+                val nowMs = System.currentTimeMillis()
+                // Only auto-push GPS locality when no call/nav/song banner hold is active on the cluster
                 if (isConnected && _autoLocationSyncEnabled.value && !_incomingCallState.value.isRinging &&
+                    !_navigationState.value.isRouteSimulationRunning && nowMs >= lastBannerHoldUntilMs &&
                     _customLocationOverride.value.isBlank() && locality != previousLocality
                 ) {
                     dumpLocationToClusterNow(locality)
@@ -436,6 +438,9 @@ class IqubeBleManager(
             }
         }
     }
+
+    @Volatile
+    private var lastBannerHoldUntilMs: Long = 0L
 
     private fun isActivelyConnectedOrReplaying(): Boolean {
         val phase = _connectionPhase.value
@@ -485,14 +490,14 @@ class IqubeBleManager(
 
     /**
      * Executes the full BLE Connection Handshake Synchronization Sequence:
-     * 1. Phone Battery & Network Status Bar (`0x5B 0x52 0x55`, e.g. 85% + 4/4 signal bars)
-     * 2. 24-Hour Local Clock & Date Sync (`0x5B 0x4A 0x44`)
+     * 1. Phone Battery & Network Status Bar (`0x5B 0x52 0x55`, e.g. 85% -> 4/4 or 20% -> 1/4 bars)
+     * 2. 24-Hour Local Clock & Date Sync (`0x5B 0x4A` + `0x5A 0xF1` RTC sync)
      * 3. Editable Rider Greeting Banner (`0x5B 0x52`, e.g. `"Rider"`)
      * 4. Top-Line GPS Locality Pin (`0x5B 0x5C`, e.g. `"Dhantoli"`)
      */
     private fun performConnectionHandshakeSequence() {
         sendPhoneStatusRelayNow()
-        syncClockToClusterNow()
+        syncClockToClusterNow(isBackgroundHeartbeat = false)
         syncRiderGreetingToCluster(_riderGreetingName.value)
         dumpLocationToClusterNow()
     }
@@ -501,13 +506,13 @@ class IqubeBleManager(
      * Dedicated Caller ID Banner (`0x5B 0x43` / `DATA_ID_CALLER_43` & `0x5B 0x5D 0x43`).
      * Extracts caller's 1st Name (e.g. `"Rahul"` from `"Rahul Sharma"`), sends `callState = 0x00` (Ringing)
      * and `[0x5B, 0x43, ...utf8(firstName), ...0x00, 0xFF]`, and starts a 500 ms periodic repeat timer
-     * (`iQubeCallerDataSendTimer`) while ringing so background GPS location writes (`0x5B 0x5C`) are paused
-     * and the top location pin remains independent.
+     * (`iQubeCallerDataSendTimer`) while ringing so background GPS location writes (`0x5B 0x5C`) are paused.
      */
     fun triggerIncomingCallAlert(fullCallerName: String) {
         val cleaned = fullCallerName.trim().ifBlank { "Rahul Sharma" }
         val firstName = cleaned.split(Regex("\\s+")).firstOrNull()?.replace(Regex("[^\\x20-\\x7E]"), "")?.ifBlank { "Caller" } ?: "Caller"
         val clusterCallText = firstName.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
+        lastBannerHoldUntilMs = System.currentTimeMillis() + 20_000L
 
         _incomingCallState.value = IncomingCallRelayState(
             isRinging = true,
@@ -521,13 +526,13 @@ class IqubeBleManager(
 
         // 1. Send Call State Ringing (`0x5B 0x5D 0x43 0x00 ... 0xFF`)
         commandDispatcher.enqueueCommand(
-            label = "Call State Ringing (5B 5D 43 00 … FF)",
+            label = "Call State Incoming (5B 5D 43 00 … FF)",
             rawPayload = commandDispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_RINGING)
         )
         // 2. Send Dedicated Caller ID Frame (`0x5B 0x43 <17B firstName> 0xFF`)
-        val callerPayload = commandDispatcher.buildCallerPacket0x43(cleaned)
+        val callerPayload = commandDispatcher.buildCallerPacket0x43(cleaned, extractFirstWordOnly = true)
         commandDispatcher.enqueueCommand(
-            label = "Caller ID [C $clusterCallText (5B 43 … FF)",
+            label = "Incoming Caller ID [C $clusterCallText (5B 43 … FF)",
             rawPayload = callerPayload
         )
 
@@ -539,7 +544,7 @@ class IqubeBleManager(
                 if (_incomingCallState.value.isRinging && commandDispatcher.queueDepth.value <= 2) {
                     commandDispatcher.enqueueCommand(
                         label = "Caller Repeat 500ms [C $clusterCallText",
-                        rawPayload = commandDispatcher.buildCallerPacket0x43(cleaned)
+                        rawPayload = commandDispatcher.buildCallerPacket0x43(cleaned, extractFirstWordOnly = true)
                     )
                     _incomingCallState.update {
                         it.copy(packetsTransmittedCount = it.packetsTransmittedCount + 1)
@@ -559,12 +564,108 @@ class IqubeBleManager(
     }
 
     /**
-     * Ends the active incoming call alert, cancels the 500 ms `iQubeCallerDataSendTimer`,
+     * Tests an Outgoing Call on the cluster (`0x5B 0x5D 0x43 0x04` / `0x01` + `"Call: <FirstName>"` on `0x5B 0x43` & `0x5B 0x5C`).
+     */
+    fun triggerOutgoingCallAlert(fullCallerName: String) {
+        val cleaned = fullCallerName.trim().ifBlank { "Rahul Sharma" }
+        val firstName = cleaned.split(Regex("\\s+")).firstOrNull()?.replace(Regex("[^\\x20-\\x7E]"), "")?.ifBlank { "Caller" } ?: "Caller"
+        val bannerText = "Call: $firstName".take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
+        lastBannerHoldUntilMs = System.currentTimeMillis() + 20_000L
+
+        _incomingCallState.value = IncomingCallRelayState(
+            isRinging = true,
+            fullCallerName = cleaned,
+            extractedFirstName = firstName,
+            clusterFormattedText = bannerText,
+            callStateByte = IqubeBleSpec.CALL_STATE_OUTGOING.toInt(),
+            packetsTransmittedCount = 1,
+            ringStartTimeMs = System.currentTimeMillis()
+        )
+        _lastSyncedClusterLocation.value = bannerText
+
+        commandDispatcher.enqueueCommand(
+            label = "Call State Outgoing (5B 5D 43 04 … FF)",
+            rawPayload = commandDispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_OUTGOING)
+        )
+        commandDispatcher.enqueueCommand(
+            label = "Outgoing Call [C $bannerText (5B 43 … FF)",
+            rawPayload = commandDispatcher.buildCallerPacket0x43(bannerText, extractFirstWordOnly = false)
+        )
+        commandDispatcher.enqueueCommand(
+            label = "Outgoing Banner [\\$bannerText (5B 5C … FF)",
+            rawPayload = commandDispatcher.buildClusterLocationPacket(bannerText)
+        )
+
+        callerRepeatJob?.cancel()
+        callerRepeatJob = scope.launch {
+            while (isActive && _incomingCallState.value.isRinging) {
+                delay(IqubeBleSpec.CALLER_REPEAT_TIMER_MS)
+                if (_incomingCallState.value.isRinging && commandDispatcher.queueDepth.value <= 2) {
+                    commandDispatcher.enqueueCommand(
+                        label = "Outgoing Call Repeat [C $bannerText",
+                        rawPayload = commandDispatcher.buildCallerPacket0x43(bannerText, extractFirstWordOnly = false)
+                    )
+                    _incomingCallState.update {
+                        it.copy(packetsTransmittedCount = it.packetsTransmittedCount + 1)
+                    }
+                }
+            }
+        }
+
+        callAutoClearJob?.cancel()
+        callAutoClearJob = scope.launch {
+            delay(15_000L)
+            if (_incomingCallState.value.isRinging) {
+                endIncomingCallAlert()
+            }
+        }
+    }
+
+    /**
+     * Tests a Missed Call notification on the cluster (`0x5B 0x5D 0x43 0x03` + `"Miss: <FirstName>"` on `0x5B 0x43` & `0x5B 0x5C`).
+     */
+    fun triggerMissedCallAlert(fullCallerName: String) {
+        callerRepeatJob?.cancel()
+        callAutoClearJob?.cancel()
+        val cleaned = fullCallerName.trim().ifBlank { "Rahul Sharma" }
+        val firstName = cleaned.split(Regex("\\s+")).firstOrNull()?.replace(Regex("[^\\x20-\\x7E]"), "")?.ifBlank { "Caller" } ?: "Caller"
+        val bannerText = "Miss: $firstName".take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
+        lastBannerHoldUntilMs = System.currentTimeMillis() + 20_000L
+
+        _incomingCallState.update {
+            it.copy(
+                isRinging = false,
+                fullCallerName = cleaned,
+                extractedFirstName = firstName,
+                clusterFormattedText = bannerText,
+                callStateByte = IqubeBleSpec.CALL_STATE_MISSED.toInt(),
+                packetsTransmittedCount = it.packetsTransmittedCount + 1
+            )
+        }
+        _lastSyncedClusterLocation.value = bannerText
+
+        commandDispatcher.enqueueCommand(
+            label = "Call State Missed (5B 5D 43 03 … FF)",
+            rawPayload = commandDispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_MISSED)
+        )
+        commandDispatcher.enqueueCommand(
+            label = "Missed Call [C $bannerText (5B 43 … FF)",
+            rawPayload = commandDispatcher.buildCallerPacket0x43(bannerText, extractFirstWordOnly = false)
+        )
+        commandDispatcher.enqueueCommand(
+            label = "Missed Call Banner [\\$bannerText (5B 5C … FF)",
+            rawPayload = commandDispatcher.buildClusterLocationPacket(bannerText)
+        )
+    }
+
+    /**
+     * Ends the active call alert, cancels the 500 ms `iQubeCallerDataSendTimer`,
      * sends `callState = 0x02` (`Ended`), and immediately restores the live GPS locality (`0x5B 0x5C ... 0xFF`).
      */
     fun endIncomingCallAlert(callStateByte: Byte = IqubeBleSpec.CALL_STATE_ENDED) {
         callerRepeatJob?.cancel()
         callAutoClearJob?.cancel()
+        lastBannerHoldUntilMs = 0L
         val prev = _incomingCallState.value
         _incomingCallState.value = prev.copy(
             isRinging = false,
@@ -577,12 +678,33 @@ class IqubeBleManager(
         dumpLocationToClusterNow()
     }
 
+    private fun formatTurnShortPrefix(turn: TurnTypeConstant): String = when (turn) {
+        TurnTypeConstant.TURN_LEFT -> "L"
+        TurnTypeConstant.TURN_SHARPLY_LEFT -> "ShL"
+        TurnTypeConstant.TURN_SLIGHTLY_LEFT -> "SlL"
+        TurnTypeConstant.TURN_RIGHT -> "R"
+        TurnTypeConstant.TURN_SHARPLY_RIGHT -> "ShR"
+        TurnTypeConstant.TURN_SLIGHTLY_RIGHT -> "SlR"
+        TurnTypeConstant.U_TURN -> "U-Trn"
+        TurnTypeConstant.CONTINUE_STRAIGHT -> "Str"
+        TurnTypeConstant.DESTINATION_REACHED -> "Dest"
+        TurnTypeConstant.KEEP_LEFT -> "KpL"
+        TurnTypeConstant.KEEP_RIGHT -> "KpR"
+        TurnTypeConstant.FORK_LEFT -> "FkL"
+        TurnTypeConstant.FORK_RIGHT -> "FkR"
+        TurnTypeConstant.ROUNDABOUT -> "Rnd"
+        TurnTypeConstant.ROTARY -> "Rot"
+        else -> "Nav"
+    }
+
     /**
-     * Turn-by-Turn Navigation 2-Packet Sequence (`sendNavigationData` from `BleEngine.smali`):
+     * Turn-by-Turn Navigation Sequence (`sendNavigationData` from `BleEngine.smali` + U347 Banner Mirror):
      * 1. Packet 1 (`0x5B 0x49`): Maneuver icon (`TurnTypeConstants.smali` `0x00..0x48`), uint16 BE distance,
-     *    unit (`0x01`=m, `0x02`=0.1 km), and capped ETA (`Byte [6] = hrs`, `Byte [7] = mins`).
+     *    unit (`0x01`=m, `0x02`=0.1 km), capped ETA (`Byte [6] = hrs`, `Byte [7] = mins`), and `Byte [8] = 0x01` (nav active).
      * 2. Pause `400 ms` (`0x190` ms).
      * 3. Packet 2 (`0x5B 0x4E`): `"NA"` (`0x4E 0x41`) + 15-byte street name (or `0x00 0x00` + destination if `turnCode == 0x08`).
+     * 4. Also mirrors concise turn + distance + street text to `0x5B 0x5C` and `0x5B 0x43` while holding background GPS overwrites
+     *    so both graphical N282 clusters and text-banner U347 clusters immediately display the navigation maneuver.
      */
     fun sendNavigationData(
         turn: TurnTypeConstant,
@@ -597,6 +719,17 @@ class IqubeBleManager(
         val unitInt = unitByte.toInt() and 0xFF
         val pkt1 = commandDispatcher.buildNavigationManeuverPacket1(turn.code, clampedDist, unitInt, safeEta)
         val pkt2 = commandDispatcher.buildNavigationStreetPacket2(turn.code, cleanStreet)
+
+        val distBanner = if (turn == TurnTypeConstant.DESTINATION_REACHED) {
+            "Dest $cleanStreet"
+        } else if (clampedDist < 1000) {
+            "${formatTurnShortPrefix(turn)} ${clampedDist}m $cleanStreet"
+        } else {
+            String.format(java.util.Locale.US, "%s %.1fkm %s", formatTurnShortPrefix(turn), clampedDist / 1000.0, cleanStreet)
+        }.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
+
+        lastBannerHoldUntilMs = System.currentTimeMillis() + 30_000L
+        _lastSyncedClusterLocation.value = distBanner
 
         _navigationState.update {
             it.copy(
@@ -621,6 +754,10 @@ class IqubeBleManager(
             commandDispatcher.enqueueCommand(
                 label = if (turn == TurnTypeConstant.DESTINATION_REACHED) "Nav Pkt2 [N Dest $cleanStreet" else "Nav Pkt2 [NNA $cleanStreet",
                 rawPayload = pkt2
+            )
+            commandDispatcher.enqueueCommand(
+                label = "Nav Banner [\\$distBanner (0x5B 0x5C)",
+                rawPayload = commandDispatcher.buildClusterLocationPacket(distBanner)
             )
         }
     }
@@ -665,6 +802,7 @@ class IqubeBleManager(
 
     fun stopNavigationRouteSimulation() {
         navigationSimJob?.cancel()
+        lastBannerHoldUntilMs = 0L
         _navigationState.update { it.copy(isRouteSimulationRunning = false) }
     }
 
@@ -1244,9 +1382,11 @@ class IqubeBleManager(
         locationSyncJob = scope.launch {
             while (isActive) {
                 delay(IqubeBleSpec.LOCATION_SYNC_INTERVAL_MS)
-                // Pause automatic GPS location dumps while an incoming call is ringing on the cluster
+                val nowMs = System.currentTimeMillis()
+                // Pause automatic GPS location dumps while an incoming call, navigation, or song banner hold is active
                 if (isActivelyConnectedOrReplaying() && _autoLocationSyncEnabled.value &&
-                    !_incomingCallState.value.isRinging && !_isLinkDegraded.value
+                    !_incomingCallState.value.isRinging && !_navigationState.value.isRouteSimulationRunning &&
+                    nowMs >= lastBannerHoldUntilMs && !_isLinkDegraded.value
                 ) {
                     dumpLocationToClusterNow()
                 }
@@ -1427,8 +1567,9 @@ class IqubeBleManager(
     }
 
     /**
-     * Transmits `0x5B 0x52 0x55` (`[0x5B, 0x52, 0x55, phoneBatteryPct, signalBars, 0x01, 0..0, 0xFF]`)
-     * to synchronize the cluster's top status tray battery and cellular bars.
+     * Transmits `0x5B 0x52 0x55` (`[0x5B, 0x52, 0x55, phoneBatteryPct, batteryBars, 0x01, signalBars, ...0, 0xFF]`)
+     * AND `0x5B 0x4A` (`p[2] = (batteryBars << 4) | signalBars`, `p[11] = batteryBars`)
+     * to synchronize the cluster's top status tray battery bars (e.g. ~20% -> 1/4 bars) and cellular bars.
      */
     fun sendPhoneStatusRelayNow(signalBars: Int = _phoneStatusState.value.signalBars) {
         val currentState = _phoneStatusState.value
@@ -1437,35 +1578,73 @@ class IqubeBleManager(
         } else {
             readHardwarePhoneBatteryPercent()
         }
+        val batteryBars = IqubeBleSpec.computePhoneBatteryBars(batteryPct)
+        val clampedSigBars = signalBars.coerceIn(0, 4)
         val now = System.currentTimeMillis()
         _phoneStatusState.update {
             it.copy(
                 phoneBatteryPct = batteryPct,
-                signalBars = signalBars.coerceIn(0, 4),
+                signalBars = clampedSigBars,
                 lastPhoneStatusSyncMs = now
             )
         }
         commandDispatcher.enqueueCommand(
-            label = "Phone Status [RU (${batteryPct}% • ${signalBars}/4 bars)",
-            rawPayload = commandDispatcher.buildPhoneStatusPacket(batteryPct, signalBars)
+            label = "Phone Status [RU (${batteryPct}% • ${batteryBars}/4 Batt Bars)",
+            rawPayload = commandDispatcher.buildPhoneStatusPacket(batteryPct, clampedSigBars)
+        )
+        commandDispatcher.enqueueCommand(
+            label = "Status Tray Sync [J (${batteryBars}/4 Batt • ${clampedSigBars}/4 Sig)",
+            rawPayload = commandDispatcher.buildClockSyncPacket(
+                batteryPct = batteryPct,
+                signalBars = clampedSigBars
+            )
         )
     }
 
     /**
-     * Transmits `0x5B 0x4A 0x44` (`[0x5B, 0x4A, 0x44, hh, mm, ss, 0x01, DD, MM, YY, 0..0, 0xFF]`)
-     * to synchronize the cluster's 24-hour local RTC clock & date.
+     * Transmits `0x5B 0x4A` (`[0x5B, 0x4A, statusByte, hh, mm, ss, 0x01, DD, MM, YY, 0, battBars, 0..0, 0xFF]`)
+     * and, on manual/initial sync, also `0x5A 0xF1` (`createVehicleDataArray` with `p[6..11]` = `HH:mm:ss DD/MM/YY`)
+     * to synchronize the cluster's 24-hour local RTC clock & date on both U347 and N282 firmware.
      */
     fun syncClockToClusterNow(isBackgroundHeartbeat: Boolean = false) {
         val now = System.currentTimeMillis()
-        _phoneStatusState.update { it.copy(lastClockSyncMs = now) }
+        val state = _phoneStatusState.value
+        val batteryPct = if (state.isBatteryOverrideEnabled) state.phoneBatteryPct else readHardwarePhoneBatteryPercent()
+        val batteryBars = IqubeBleSpec.computePhoneBatteryBars(batteryPct)
+        _phoneStatusState.update {
+            it.copy(
+                phoneBatteryPct = batteryPct,
+                lastClockSyncMs = now
+            )
+        }
         commandDispatcher.enqueueCommand(
-            label = if (isBackgroundHeartbeat) "Clock Heartbeat [JD (24h Sync)" else "Clock & Date Sync [JD (0x5B 0x4A 0x44)",
-            rawPayload = commandDispatcher.buildClockSyncPacket()
+            label = if (isBackgroundHeartbeat) {
+                "Clock Heartbeat [J (${batteryBars}/4 Batt • 24h Sync)"
+            } else {
+                "Clock & Date Sync [J (0x5B 0x4A • ${batteryBars}/4 Bars)"
+            },
+            rawPayload = commandDispatcher.buildClockSyncPacket(
+                batteryPct = batteryPct,
+                signalBars = state.signalBars
+            )
         )
+        if (!isBackgroundHeartbeat) {
+            val activeTab = packetParser.telemetryState.value.activeTripTab
+            val subCmd = if (activeTab == 1) {
+                _tripSubcommandConfig.value.switchTripBByte.toByte()
+            } else {
+                _tripSubcommandConfig.value.switchTripAByte.toByte()
+            }
+            commandDispatcher.enqueueCommand(
+                label = "Vehicle RTC Time Sync (0x5A 0xF1 HH:mm:ss DD/MM/YY)",
+                rawPayload = commandDispatcher.buildTripControlFrame(subCmd)
+            )
+        }
     }
 
     /**
-     * Transmits `0x5B 0x62` (`SONG_NAME_PACKET`) when playing, or restores caller/locality banner when paused.
+     * Shows the simple song name directly in the cluster's text banner using `0x5B 0x62` (`SONG_NAME_PACKET`),
+     * `0x5B 0x5C` (Cluster Banner), and `0x5B 0x43` (Text Alert Banner), or restores the GPS locality banner when cleared.
      */
     fun sendMusicTrackToCluster(songTitle: String, artistName: String = _mediaPlayerState.value.artistName, isPlaying: Boolean = true) {
         val cleaned = songTitle.replace(Regex("[^\\x20-\\x7E]"), "").trim().ifEmpty { "Midnight City" }.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
@@ -1474,18 +1653,29 @@ class IqubeBleManager(
         _mediaPlayerState.update {
             it.copy(
                 trackTitle = cleaned,
-                artistName = artistName.ifBlank { "M83" },
+                artistName = artistName.ifBlank { "Banner" },
                 isPlaying = isPlaying,
                 lastSentBannerHex = pkt.toHexString()
             )
         }
         if (isPlaying) {
+            lastBannerHoldUntilMs = System.currentTimeMillis() + 60_000L
+            _lastSyncedClusterLocation.value = cleaned
             commandDispatcher.enqueueCommand(
-                label = "Music Track [b $cleaned (0x5B 0x62)",
+                label = "Song Name [b $cleaned (0x5B 0x62)",
                 rawPayload = pkt
             )
+            commandDispatcher.enqueueCommand(
+                label = "Song Banner [\\$cleaned (0x5B 0x5C)",
+                rawPayload = commandDispatcher.buildClusterLocationPacket(cleaned)
+            )
+            commandDispatcher.enqueueCommand(
+                label = "Song Text [C $cleaned (0x5B 0x43)",
+                rawPayload = commandDispatcher.buildCallerPacket0x43(cleaned, extractFirstWordOnly = false)
+            )
         } else {
-            // Restore active caller banner or GPS locality banner when music pauses
+            lastBannerHoldUntilMs = 0L
+            // Restore active caller banner or GPS locality banner when cleared
             if (_incomingCallState.value.isRinging) {
                 commandDispatcher.enqueueCommand(
                     label = "Restore Caller [C ${_incomingCallState.value.clusterFormattedText}",
