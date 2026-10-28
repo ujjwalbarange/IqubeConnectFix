@@ -95,8 +95,24 @@ class IqubeBleManager(
     private var callAutoClearJob: Job? = null
     private var callerRepeatJob: Job? = null
     private var navSequenceJob: Job? = null
+    private var navKeepAliveJob: Job? = null
     private var navigationSimJob: Job? = null
     private var reconnectAttemptCount = 0
+
+    // Notification Preferences
+    private val _statusNotificationsEnabled = MutableStateFlow(
+        context.getSharedPreferences("iqube_prefs", Context.MODE_PRIVATE)
+            .getBoolean("status_notifications_enabled", true)
+    )
+    val statusNotificationsEnabled: StateFlow<Boolean> = _statusNotificationsEnabled.asStateFlow()
+
+    fun setStatusNotificationsEnabled(enabled: Boolean) {
+        _statusNotificationsEnabled.value = enabled
+        context.getSharedPreferences("iqube_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("status_notifications_enabled", enabled)
+            .apply()
+    }
 
     // Connection & Link StateFlows
     private val _connectionPhase = MutableStateFlow(BleConnectionPhase.DISCONNECTED)
@@ -386,12 +402,28 @@ class IqubeBleManager(
                     )
                 }
 
-                // 4. Update active Connect-to-Disconnect Trip Session
+                // 4. Update active Connect-to-Disconnect Trip Session with Eco vs Power breakdown
                 val currentSession = _activeTripSession.value ?: return@collect
                 val speed = tele.speedKmh ?: 0
                 val updatedStartOdo = currentSession.startOdometerKm ?: tele.odometerKm
                 val updatedStartSoc = currentSession.startBatteryPct ?: tele.batteryPercent
                 val updatedMode = if (tele.rideMode == RideMode.POWER) RideMode.POWER else currentSession.dominantRideMode
+
+                val lastOdo = currentSession.lastTrackedOdometerKm ?: updatedStartOdo
+                val lastSoc = currentSession.lastTrackedBatteryPct ?: updatedStartSoc
+                val deltaDistKm = if (lastOdo != null && tele.odometerKm != null && tele.odometerKm > lastOdo) {
+                    (tele.odometerKm - lastOdo).coerceIn(0.0, 50.0)
+                } else 0.0
+
+                val deltaSocDrop = if (lastSoc != null && tele.batteryPercent != null && lastSoc > tele.batteryPercent) {
+                    (lastSoc - tele.batteryPercent).coerceIn(0, 100)
+                } else 0
+
+                val isPower = tele.rideMode == RideMode.POWER
+                val newEcoDist = currentSession.ecoDistanceKm + (if (!isPower) deltaDistKm else 0.0)
+                val newPowerDist = currentSession.powerDistanceKm + (if (isPower) deltaDistKm else 0.0)
+                val newEcoSoc = currentSession.ecoBatteryUsedPct + (if (!isPower) deltaSocDrop else 0)
+                val newPowerSoc = currentSession.powerBatteryUsedPct + (if (isPower) deltaSocDrop else 0)
 
                 _activeTripSession.value = currentSession.copy(
                     startOdometerKm = updatedStartOdo,
@@ -399,8 +431,15 @@ class IqubeBleManager(
                     speedSamplesSum = currentSession.speedSamplesSum + speed,
                     speedSamplesCount = currentSession.speedSamplesCount + (if (tele.speedKmh != null) 1 else 0),
                     peakSpeedKmh = max(currentSession.peakSpeedKmh, tele.peakSpeedKmh),
-                    dominantRideMode = updatedMode
+                    dominantRideMode = updatedMode,
+                    ecoDistanceKm = newEcoDist,
+                    powerDistanceKm = newPowerDist,
+                    ecoBatteryUsedPct = newEcoSoc,
+                    powerBatteryUsedPct = newPowerSoc,
+                    lastTrackedOdometerKm = tele.odometerKm ?: lastOdo,
+                    lastTrackedBatteryPct = tele.batteryPercent ?: lastSoc
                 )
+                com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
             }
         }
     }
@@ -790,6 +829,34 @@ class IqubeBleManager(
                 rawPayload = pktControl0x5B4E
             )
         }
+
+        // Keep-Alive Loop: Continuously refresh the TVS cluster's 3-second display inactivity timer every 2.5s
+        // so turn maneuver, distance, and ETA remain continuously visible until navigation is turned off on the phone
+        navKeepAliveJob?.cancel()
+        if (turn != TurnTypeConstant.DESTINATION_REACHED && clampedDist > 0) {
+            navKeepAliveJob = scope.launch {
+                while (isActive && _navigationState.value.distanceMeters > 0 &&
+                    _navigationState.value.selectedTurn != TurnTypeConstant.DESTINATION_REACHED
+                ) {
+                    delay(2500L)
+                    if (commandDispatcher.queueDepth.value <= 2 && !_incomingCallState.value.isRinging) {
+                        val currentNav = _navigationState.value
+                        val refresh5B4E = commandDispatcher.buildNavigationControlPacket0x4E(
+                            turnCode = currentNav.selectedTurn.code,
+                            distanceMeters = currentNav.distanceMeters,
+                            etaMinutes = currentNav.etaMinutes,
+                            totalRemainingDistanceMeters = max(currentNav.distanceMeters, currentNav.distanceMeters + 200),
+                            navActive = true,
+                            headerByte = IqubeBleSpec.HEADER_ASCII_CMD
+                        )
+                        commandDispatcher.enqueueCommand(
+                            label = String.format("Nav KeepAlive [N %s (%dm, ETA %dm)", currentNav.selectedTurn.title, currentNav.distanceMeters, currentNav.etaMinutes),
+                            rawPayload = refresh5B4E
+                        )
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -831,6 +898,7 @@ class IqubeBleManager(
 
     fun stopNavigationRouteSimulation() {
         navigationSimJob?.cancel()
+        navKeepAliveJob?.cancel()
         _navigationState.update { it.copy(isRouteSimulationRunning = false) }
     }
 
@@ -841,6 +909,7 @@ class IqubeBleManager(
     fun clearNavigationOnCluster() {
         stopNavigationRouteSimulation()
         navSequenceJob?.cancel()
+        navKeepAliveJob?.cancel()
         val end5A = commandDispatcher.buildEndNavigationPacket(IqubeBleSpec.HEADER_TELEMETRY)
         val end5B = commandDispatcher.buildEndNavigationPacket(IqubeBleSpec.HEADER_ASCII_CMD)
         _navigationState.update {
@@ -1027,36 +1096,69 @@ class IqubeBleManager(
 
     @SuppressLint("MissingPermission")
     fun startGpsTelemetryFusion() {
+        acquireSingleLocationFix()
+    }
+
+    /**
+     * Efficient Location Acquirer: Fetches an accurate location fix on-demand only at ride start or stop,
+     * immediately unregistering the GPS hardware to avoid continuous battery, CPU, and RAM drain.
+     */
+    @SuppressLint("MissingPermission")
+    fun acquireSingleLocationFix() {
         try {
             val locManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
             val providers = locManager.getProviders(true)
             for (provider in providers) {
                 locManager.getLastKnownLocation(provider)?.let { loc ->
-                    if (_lastKnownLocation.value == null) {
-                        _lastKnownLocation.value = loc
-                        scope.launch {
-                            _detectedLocalityName.value =
-                                tripRepository.reverseGeocodeLocality(loc.latitude, loc.longitude)
+                    _lastKnownLocation.value = loc
+                    scope.launch {
+                        val locality = tripRepository.reverseGeocodeLocality(loc.latitude, loc.longitude)
+                        _detectedLocalityName.value = locality
+                        if (isActivelyConnectedOrReplaying() && _autoLocationSyncEnabled.value &&
+                            !_incomingCallState.value.isRinging && !_navigationState.value.isRouteSimulationRunning
+                        ) {
+                            dumpLocationToClusterNow(locality)
                         }
                     }
                 }
             }
+
+            var fixReceived = false
+            val singleListener = object : LocationListener {
+                override fun onLocationChanged(loc: Location) {
+                    if (!fixReceived) {
+                        fixReceived = true
+                        _lastKnownLocation.value = loc
+                        scope.launch {
+                            val locality = tripRepository.reverseGeocodeLocality(loc.latitude, loc.longitude)
+                            _detectedLocalityName.value = locality
+                            if (isActivelyConnectedOrReplaying() && _autoLocationSyncEnabled.value &&
+                                !_incomingCallState.value.isRinging && !_navigationState.value.isRouteSimulationRunning
+                            ) {
+                                dumpLocationToClusterNow(locality)
+                            }
+                            com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+                        }
+                        runCatching { locManager.removeUpdates(this) }
+                    }
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onStatusChanged(p: String?, s: Int, e: Bundle?) {}
+                override fun onProviderEnabled(p: String) {}
+                override fun onProviderDisabled(p: String) {}
+            }
+
             if (locManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                locManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    2000L,
-                    2f,
-                    locationListener,
-                    Looper.getMainLooper()
-                )
+                locManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, singleListener, Looper.getMainLooper())
             } else if (locManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    3000L,
-                    5f,
-                    locationListener,
-                    Looper.getMainLooper()
-                )
+                locManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 0f, singleListener, Looper.getMainLooper())
+            }
+
+            scope.launch {
+                delay(8000L)
+                if (!fixReceived) {
+                    runCatching { locManager.removeUpdates(singleListener) }
+                }
             }
         } catch (_: SecurityException) {
         } catch (_: Exception) {
@@ -2041,7 +2143,11 @@ class IqubeBleManager(
                 avgSpeedKmh = avgSpeed,
                 rideMode = session.dominantRideMode,
                 efficiencyKmPerPct = efficiency,
-                disconnectReason = disconnectReason
+                disconnectReason = disconnectReason,
+                ecoDistanceKm = ((session.ecoDistanceKm * 10.0).roundToInt() / 10.0).coerceAtLeast(0.0),
+                powerDistanceKm = ((session.powerDistanceKm * 10.0).roundToInt() / 10.0).coerceAtLeast(0.0),
+                ecoBatteryUsedPct = session.ecoBatteryUsedPct.coerceAtLeast(0),
+                powerBatteryUsedPct = session.powerBatteryUsedPct.coerceAtLeast(0)
             )
             tripRepository.saveCompletedTrip(savedRecord)
         }

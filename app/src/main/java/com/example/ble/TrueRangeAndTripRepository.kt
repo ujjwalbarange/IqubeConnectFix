@@ -59,57 +59,92 @@ class TrueRangeAndTripRepository(private val context: Context?) {
             val qualifyingTrips = savedTrips
                 .filter { it.distanceKm >= 1.0 && it.batteryUsedPct >= 1 }
                 .take(3)
-            var histEcoEquivKm = 0.0
-            var histBatteryPct = 0
+
+            var histEcoKm = 0.0
+            var histEcoBatteryPct = 0
+            var histPowerKm = 0.0
+            var histPowerBatteryPct = 0
 
             for (trip in qualifyingTrips) {
-                val ecoNormalizedTripKm = if (trip.rideMode == RideMode.POWER) {
-                    trip.distanceKm / IqubeBleSpec.POWER_TO_ECO_RATIO
+                if (trip.ecoDistanceKm > 0.0 || trip.powerDistanceKm > 0.0) {
+                    histEcoKm += trip.ecoDistanceKm
+                    histEcoBatteryPct += trip.ecoBatteryUsedPct
+                    histPowerKm += trip.powerDistanceKm
+                    histPowerBatteryPct += trip.powerBatteryUsedPct
                 } else {
-                    trip.distanceKm
+                    if (trip.rideMode == RideMode.POWER) {
+                        histPowerKm += trip.distanceKm
+                        histPowerBatteryPct += trip.batteryUsedPct
+                    } else {
+                        histEcoKm += trip.distanceKm
+                        histEcoBatteryPct += trip.batteryUsedPct
+                    }
                 }
-                histEcoEquivKm += ecoNormalizedTripKm
-                histBatteryPct += trip.batteryUsedPct
             }
 
             val currBatteryDropPct = if (activeTripStartBatteryPct != null && currentBatteryPct != null) {
                 max(0, activeTripStartBatteryPct - currentBatteryPct)
             } else 0
 
-            val currEcoEquivKm = if (currBatteryDropPct >= 1 && activeTripDistanceKm > 0.0) {
-                if (activeTripMode == RideMode.POWER) {
-                    activeTripDistanceKm / IqubeBleSpec.POWER_TO_ECO_RATIO
-                } else {
-                    activeTripDistanceKm
-                }
-            } else 0.0
+            var liveEcoKm = 0.0
+            var liveEcoBatt = 0
+            var livePowerKm = 0.0
+            var livePowerBatt = 0
 
-            val totalEcoEquivKm = histEcoEquivKm + currEcoEquivKm
+            if (currBatteryDropPct >= 1 && activeTripDistanceKm > 0.0) {
+                if (activeTripMode == RideMode.POWER) {
+                    livePowerKm = activeTripDistanceKm
+                    livePowerBatt = currBatteryDropPct
+                } else {
+                    liveEcoKm = activeTripDistanceKm
+                    liveEcoBatt = currBatteryDropPct
+                }
+            }
+
+            val totalEcoKm = histEcoKm + liveEcoKm
+            val totalEcoBatt = histEcoBatteryPct + liveEcoBatt
+            val totalPowerKm = histPowerKm + livePowerKm
+            val totalPowerBatt = histPowerBatteryPct + livePowerBatt
+
+            val isEcoLearned = totalEcoBatt >= 1 && totalEcoKm > 0.0
+            val isPowerLearned = totalPowerBatt >= 1 && totalPowerKm > 0.0
+
+            val ecoKmPerPct: Double = if (isEcoLearned) {
+                ((totalEcoKm / totalEcoBatt.toDouble()).coerceIn(0.50, 1.60) * 100.0).roundToInt() / 100.0
+            } else {
+                IqubeBleSpec.DEFAULT_ECO_KM_PER_PCT
+            }
+
+            val powerKmPerPct: Double = if (isPowerLearned) {
+                ((totalPowerKm / totalPowerBatt.toDouble()).coerceIn(0.35, 1.30) * 100.0).roundToInt() / 100.0
+            } else if (isEcoLearned) {
+                ((ecoKmPerPct * IqubeBleSpec.POWER_TO_ECO_RATIO) * 100.0).roundToInt() / 100.0
+            } else {
+                IqubeBleSpec.DEFAULT_POWER_KM_PER_PCT
+            }
+
             val totalRawKm = qualifyingTrips.sumOf { it.distanceKm } +
                 (if (currBatteryDropPct >= 1) activeTripDistanceKm else 0.0)
-            val totalBatteryPctUsed = histBatteryPct + (if (currEcoEquivKm > 0.0) currBatteryDropPct else 0)
+            val totalBatteryPctUsed = qualifyingTrips.sumOf { it.batteryUsedPct } +
+                (if (currBatteryDropPct >= 1) currBatteryDropPct else 0)
 
-            val isLearned = totalBatteryPctUsed >= 1 && totalEcoEquivKm > 0.0
-            val ecoKmPerPct: Double
-            val powerKmPerPct: Double
-            val sourceLabel: String
-
-            if (!isLearned) {
-                ecoKmPerPct = IqubeBleSpec.DEFAULT_ECO_KM_PER_PCT     // 1.00 km / 1%
-                powerKmPerPct = IqubeBleSpec.DEFAULT_POWER_KM_PER_PCT // 0.75 km / 1%
-                sourceLabel = "Default Baseline (Eco 1.00 km/% • Power 0.75 km/%)"
-            } else {
-                val rawEcoRate = (totalEcoEquivKm / totalBatteryPctUsed.toDouble()).coerceIn(0.60, 1.50)
-                ecoKmPerPct = (rawEcoRate * 100.0).roundToInt() / 100.0
-                powerKmPerPct = ((ecoKmPerPct * IqubeBleSpec.POWER_TO_ECO_RATIO) * 100.0).roundToInt() / 100.0
-                val tripCount = qualifyingTrips.size + (if (currEcoEquivKm > 0.0) 1 else 0)
-                sourceLabel = String.format(
+            val sourceLabel = when {
+                isPowerLearned && isEcoLearned -> String.format(
                     Locale.US,
-                    "Rolling %d-Trip + Live Efficiency (%.2f km / %d%% used)",
-                    tripCount,
-                    totalRawKm,
-                    totalBatteryPctUsed
+                    "Learned Eco (%.2f km/%% from %.1f km) & Power (%.2f km/%% from %.1f km)",
+                    ecoKmPerPct, totalEcoKm, powerKmPerPct, totalPowerKm
                 )
+                isEcoLearned -> String.format(
+                    Locale.US,
+                    "Learned Eco (%.2f km/%% from %.1f km) • Default Power Ratio",
+                    ecoKmPerPct, totalEcoKm
+                )
+                isPowerLearned -> String.format(
+                    Locale.US,
+                    "Learned Power (%.2f km/%% from %.1f km) • Default Eco Baseline",
+                    powerKmPerPct, totalPowerKm
+                )
+                else -> "Default Baseline (Eco 1.00 km/% • Power 0.75 km/%)"
             }
 
             val trueEcoRange = currentBatteryPct?.let {
@@ -126,8 +161,8 @@ class TrueRangeAndTripRepository(private val context: Context?) {
                 powerKmPerPct = powerKmPerPct,
                 totalDistanceLearnedKm = (totalRawKm * 100.0).roundToInt() / 100.0,
                 totalBatteryUsedLearnedPct = totalBatteryPctUsed,
-                contributingTripsCount = qualifyingTrips.size + (if (currEcoEquivKm > 0.0) 1 else 0),
-                isUsingLearnedEfficiency = isLearned,
+                contributingTripsCount = qualifyingTrips.size + (if (currBatteryDropPct >= 1) 1 else 0),
+                isUsingLearnedEfficiency = isEcoLearned || isPowerLearned,
                 calculationSourceLabel = sourceLabel
             )
         }
@@ -469,7 +504,11 @@ class TrueRangeAndTripRepository(private val context: Context?) {
                             RideMode.valueOf(obj.optString("rideMode", RideMode.ECO.name))
                         }.getOrDefault(RideMode.ECO),
                         efficiencyKmPerPct = obj.optDouble("efficiencyKmPerPct", 1.0),
-                        disconnectReason = obj.optString("disconnectReason", "Disconnected")
+                        disconnectReason = obj.optString("disconnectReason", "Disconnected"),
+                        ecoDistanceKm = obj.optDouble("ecoDistanceKm", 0.0),
+                        powerDistanceKm = obj.optDouble("powerDistanceKm", 0.0),
+                        ecoBatteryUsedPct = obj.optInt("ecoBatteryUsedPct", 0),
+                        powerBatteryUsedPct = obj.optInt("powerBatteryUsedPct", 0)
                     )
                 )
             }
@@ -510,6 +549,10 @@ class TrueRangeAndTripRepository(private val context: Context?) {
             put("rideMode", t.rideMode.name)
             put("efficiencyKmPerPct", t.efficiencyKmPerPct)
             put("disconnectReason", t.disconnectReason)
+            put("ecoDistanceKm", t.ecoDistanceKm)
+            put("powerDistanceKm", t.powerDistanceKm)
+            put("ecoBatteryUsedPct", t.ecoBatteryUsedPct)
+            put("powerBatteryUsedPct", t.powerBatteryUsedPct)
         }
     }
 

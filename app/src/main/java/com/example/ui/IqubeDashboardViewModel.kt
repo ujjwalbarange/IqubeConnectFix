@@ -52,6 +52,7 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
     val isLinkDegraded: StateFlow<Boolean> = bleManager.isLinkDegraded
     val linkWarningMessage: StateFlow<String?> = bleManager.linkWarningMessage
     val autoReconnectEnabled: StateFlow<Boolean> = bleManager.autoReconnectEnabled
+    val statusNotificationsEnabled: StateFlow<Boolean> = bleManager.statusNotificationsEnabled
     val heartbeatEnabled: StateFlow<Boolean> = bleManager.heartbeatEnabled
     val autoLocationSyncEnabled: StateFlow<Boolean> = bleManager.autoLocationSyncEnabled
     val fragmentedSliceTestEnabled: StateFlow<Boolean> = bleManager.fragmentedSliceTestEnabled
@@ -175,6 +176,14 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
 
     fun clearNavigationOnCluster() {
         bleManager.clearNavigationOnCluster()
+    }
+
+    fun setStatusNotificationsEnabled(enabled: Boolean) {
+        bleManager.setStatusNotificationsEnabled(enabled)
+    }
+
+    fun setAutoReconnectEnabled(enabled: Boolean) {
+        bleManager.setAutoReconnectEnabled(enabled)
     }
 
     fun setGoogleMapsAutoForwardEnabled(enabled: Boolean) {

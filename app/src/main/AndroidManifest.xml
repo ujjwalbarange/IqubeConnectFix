@@ -37,6 +37,11 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Telephony & Contacts permissions for real cluster incoming call alerts -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="false" />
@@ -79,6 +84,28 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|location" />
+
+        <!-- Real Telephony Receiver for incoming call alerts on cluster -->
+        <receiver
+            android:name=".ble.PhoneCallStateReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- TVS iQube Cockpit Home Screen App Widget -->
+        <receiver
+            android:name="com.example.widget.IqubeAppWidgetProvider"
+            android:exported="true"
+            android:label="TVS iQube Cockpit Widget">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/iqube_widget_info" />
+        </receiver>
     </application>
 
 </manifest>

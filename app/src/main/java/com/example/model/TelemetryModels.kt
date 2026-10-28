@@ -531,7 +531,13 @@ data class ActiveTripSession(
     val speedSamplesSum: Long = 0L,
     val speedSamplesCount: Int = 0,
     val peakSpeedKmh: Int = 0,
-    val dominantRideMode: RideMode = RideMode.ECO
+    val dominantRideMode: RideMode = RideMode.ECO,
+    val ecoDistanceKm: Double = 0.0,
+    val powerDistanceKm: Double = 0.0,
+    val ecoBatteryUsedPct: Int = 0,
+    val powerBatteryUsedPct: Int = 0,
+    val lastTrackedBatteryPct: Int? = null,
+    val lastTrackedOdometerKm: Double? = null
 )
 
 data class SavedTripRecord(
@@ -555,7 +561,11 @@ data class SavedTripRecord(
     val avgSpeedKmh: Double,
     val rideMode: RideMode,
     val efficiencyKmPerPct: Double,
-    val disconnectReason: String
+    val disconnectReason: String,
+    val ecoDistanceKm: Double = 0.0,
+    val powerDistanceKm: Double = 0.0,
+    val ecoBatteryUsedPct: Int = 0,
+    val powerBatteryUsedPct: Int = 0
 )
 
 data class QueuedWriteCommand(
