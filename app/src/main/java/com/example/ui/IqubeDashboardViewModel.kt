@@ -6,6 +6,8 @@ import com.example.ble.IqubeBleManager
 import com.example.model.ActiveTripSession
 import com.example.model.BleConnectionPhase
 import com.example.model.ByteOffsetMapping
+import com.example.model.ChargingAlertConfig
+import com.example.model.ChargingAlertType
 import com.example.model.ChargingMonitorState
 import com.example.model.GoogleMapsListenerState
 import com.example.model.GpsBleFusionSample
@@ -64,6 +66,7 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
     // True Range, Charging Monitor, Last Seen State, Navigation, Media, Phone Status & Trip History StateFlows
     val trueRangeState: StateFlow<TrueRangeCalculation> = bleManager.trueRangeState
     val chargingMonitorState: StateFlow<ChargingMonitorState> = bleManager.chargingMonitorState
+    val chargingAlertConfig: StateFlow<ChargingAlertConfig> = bleManager.chargingAlertConfig
     val lastSeenState: StateFlow<LastSeenScooterState?> = bleManager.lastSeenState
     val incomingCallState: StateFlow<IncomingCallRelayState> = bleManager.incomingCallState
     val navigationState: StateFlow<NavigationManeuverState> = bleManager.navigationState
@@ -222,6 +225,22 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
     // Charging Predictor Actions
     fun simulateLiveOnePercentChargingStep() {
         bleManager.simulateLiveOnePercentChargingStep()
+    }
+
+    fun setChargingAlertEnabled(enabled: Boolean) {
+        bleManager.setChargingAlertEnabled(enabled)
+    }
+
+    fun setChargingAlertTargetPct(targetPct: Int) {
+        bleManager.setChargingAlertTargetPct(targetPct)
+    }
+
+    fun setChargingAlertType(type: ChargingAlertType) {
+        bleManager.setChargingAlertType(type)
+    }
+
+    fun stopChargingAlarm() {
+        bleManager.stopChargingAlarm()
     }
 
     fun setSelectedRangeMode(mode: RideMode) {

@@ -476,6 +476,20 @@ data class SavedChargingSession(
     val avgSecondsPerPct: Double
 )
 
+enum class ChargingAlertType(val label: String) {
+    NOTIFICATION("Notification Alert"),
+    ALARM("Sound Alarm & Vibration")
+}
+
+data class ChargingAlertConfig(
+    val isEnabled: Boolean = false,
+    val targetPct: Int = 80,
+    val alertType: ChargingAlertType = ChargingAlertType.NOTIFICATION,
+    val isAlarmRinging: Boolean = false,
+    val lastAlertedPct: Int? = null,
+    val lastAlertTimestampMs: Long? = null
+)
+
 /**
  * Offline / Disconnected "Last Seen" Scooter Snapshot persisted in local storage.
  */

@@ -41,6 +41,7 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <uses-feature
         android:name="android.hardware.bluetooth_le"
@@ -94,6 +95,15 @@
             </intent-filter>
         </receiver>
 
+        <!-- Receiver for stopping charging alarm -->
+        <receiver
+            android:name=".ble.ChargingAlarmActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.ble.ACTION_STOP_CHARGING_ALARM" />
+            </intent-filter>
+        </receiver>
+
         <!-- TVS iQube Cockpit Home Screen App Widget -->
         <receiver
             android:name="com.example.widget.IqubeAppWidgetProvider"
@@ -106,6 +116,18 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/iqube_widget_info" />
         </receiver>
+
+        <!-- TVS iQube Quick Settings Control Center Tile -->
+        <service
+            android:name="com.example.tile.IqubeQuickSettingsTileService"
+            android:exported="true"
+            android:icon="@android:drawable/stat_sys_data_bluetooth"
+            android:label="TVS iQube"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>

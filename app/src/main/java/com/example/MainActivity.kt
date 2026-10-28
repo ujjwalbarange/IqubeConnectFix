@@ -39,12 +39,15 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ble.IqubeBleForegroundService
 import com.example.ui.DashboardDestination
 import com.example.ui.IqubeDashboardViewModel
 import com.example.ui.components.TopConnectionHeader
@@ -77,6 +80,7 @@ class MainActivity : ComponentActivity() {
 fun IqubeCompanionApp(
     viewModel: IqubeDashboardViewModel = viewModel()
 ) {
+    val context = LocalContext.current
     val currentDestination by viewModel.currentDestination.collectAsStateWithLifecycle()
     val connectionPhase by viewModel.connectionPhase.collectAsStateWithLifecycle()
     val deviceName by viewModel.connectedDeviceName.collectAsStateWithLifecycle()
@@ -96,6 +100,7 @@ fun IqubeCompanionApp(
     val tripSubcommandConfig by viewModel.tripSubcommandConfig.collectAsStateWithLifecycle()
     val trueRange by viewModel.trueRangeState.collectAsStateWithLifecycle()
     val chargingMonitor by viewModel.chargingMonitorState.collectAsStateWithLifecycle()
+    val chargingAlertConfig by viewModel.chargingAlertConfig.collectAsStateWithLifecycle()
     val lastSeenState by viewModel.lastSeenState.collectAsStateWithLifecycle()
     val incomingCallState by viewModel.incomingCallState.collectAsStateWithLifecycle()
     val navigationState by viewModel.navigationState.collectAsStateWithLifecycle()
@@ -118,6 +123,19 @@ fun IqubeCompanionApp(
     val currentGpsSpeedKmh by viewModel.currentGpsSpeedKmh.collectAsStateWithLifecycle()
     val lastParkedLocation by viewModel.lastParkedLocation.collectAsStateWithLifecycle()
     val gpsFusionSamples by viewModel.gpsFusionSamples.collectAsStateWithLifecycle()
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        IqubeBleForegroundService.startService(context.applicationContext)
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        IqubeBleForegroundService.startService(context.applicationContext)
+    }
 
     val phoneCallPermissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -268,7 +286,15 @@ fun IqubeCompanionApp(
                                     onSetStatusNotificationsEnabled = viewModel::setStatusNotificationsEnabled,
                                     autoReconnectEnabled = autoReconnectEnabled,
                                     onSetAutoReconnectEnabled = viewModel::setAutoReconnectEnabled,
-                                    onRequestPhonePermissions = requestPhonePermissions
+                                    onRequestPhonePermissions = requestPhonePermissions,
+                                    chargingAlertConfig = chargingAlertConfig,
+                                    onSetChargingAlertEnabled = viewModel::setChargingAlertEnabled,
+                                    onSetChargingAlertTargetPct = viewModel::setChargingAlertTargetPct,
+                                    onSetChargingAlertType = viewModel::setChargingAlertType,
+                                    onStopChargingAlarm = viewModel::stopChargingAlarm,
+                                    onTestChargingAlert = {
+                                        viewModel.bleManager.triggerChargingAlert(chargingAlertConfig.targetPct)
+                                    }
                                 )
                             }
                             DashboardDestination.SAVED_TRIPS -> {

@@ -17,12 +17,23 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import androidx.core.app.NotificationCompat
+import com.example.MainActivity
+import com.example.model.ChargingAlertConfig
+import com.example.model.ChargingAlertType
 import com.example.model.ActiveTripSession
 import com.example.model.BleConnectionPhase
 import com.example.model.ChargingMonitorState
@@ -112,6 +123,140 @@ class IqubeBleManager(
             .edit()
             .putBoolean("status_notifications_enabled", enabled)
             .apply()
+        if (enabled) {
+            IqubeBleForegroundService.startService(context)
+        }
+    }
+
+    // Charging Target Alert Preferences (Configurable target SoC percentage + Notification vs Alarm)
+    private val alertPrefs = context.getSharedPreferences("iqube_prefs", Context.MODE_PRIVATE)
+    private val _chargingAlertConfig = MutableStateFlow(
+        ChargingAlertConfig(
+            isEnabled = alertPrefs.getBoolean("charging_alert_enabled", true),
+            targetPct = alertPrefs.getInt("charging_alert_target_pct", 80),
+            alertType = try {
+                ChargingAlertType.valueOf(alertPrefs.getString("charging_alert_type", ChargingAlertType.NOTIFICATION.name) ?: ChargingAlertType.NOTIFICATION.name)
+            } catch (_: Exception) {
+                ChargingAlertType.NOTIFICATION
+            }
+        )
+    )
+    val chargingAlertConfig: StateFlow<ChargingAlertConfig> = _chargingAlertConfig.asStateFlow()
+
+    private var hasTriggeredChargingAlertForSession: Boolean = false
+    private var alarmRingtone: Ringtone? = null
+    private var alarmVibrator: Vibrator? = null
+
+    fun setChargingAlertEnabled(enabled: Boolean) {
+        _chargingAlertConfig.update { it.copy(isEnabled = enabled) }
+        alertPrefs.edit().putBoolean("charging_alert_enabled", enabled).apply()
+        if (!enabled) {
+            stopChargingAlarm()
+        }
+    }
+
+    fun setChargingAlertTargetPct(targetPct: Int) {
+        val clamped = targetPct.coerceIn(50, 100)
+        _chargingAlertConfig.update { it.copy(targetPct = clamped) }
+        alertPrefs.edit().putInt("charging_alert_target_pct", clamped).apply()
+        hasTriggeredChargingAlertForSession = false
+    }
+
+    fun setChargingAlertType(type: ChargingAlertType) {
+        _chargingAlertConfig.update { it.copy(alertType = type) }
+        alertPrefs.edit().putString("charging_alert_type", type.name).apply()
+    }
+
+    fun stopChargingAlarm() {
+        runCatching {
+            alarmRingtone?.stop()
+            alarmRingtone = null
+            alarmVibrator?.cancel()
+            alarmVibrator = null
+        }
+        _chargingAlertConfig.update { it.copy(isAlarmRinging = false) }
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.cancel(CHARGING_ALARM_NOTIFICATION_ID)
+    }
+
+    fun triggerChargingAlert(currentPct: Int) {
+        val config = _chargingAlertConfig.value
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val openPi = PendingIntent.getActivity(
+            context,
+            100,
+            openIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val stopIntent = Intent(context, ChargingAlarmActionReceiver::class.java).apply {
+            action = ACTION_STOP_CHARGING_ALARM
+        }
+        val stopPi = PendingIntent.getBroadcast(
+            context,
+            101,
+            stopIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val title = "⚡ TVS iQube Charged to $currentPct%!"
+        val content = "Target battery reached (${config.targetPct}%). Unplug charger to preserve battery health."
+
+        val notifBuilder = NotificationCompat.Builder(context, IqubeBleForegroundService.CHARGING_ALERT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_charging)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setContentIntent(openPi)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+        if (config.alertType == ChargingAlertType.ALARM) {
+            notifBuilder.setOngoing(true)
+            notifBuilder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop Alarm", stopPi)
+            _chargingAlertConfig.update {
+                it.copy(isAlarmRinging = true, lastAlertedPct = currentPct, lastAlertTimestampMs = System.currentTimeMillis())
+            }
+            playAlarmSound()
+        } else {
+            _chargingAlertConfig.update {
+                it.copy(isAlarmRinging = false, lastAlertedPct = currentPct, lastAlertTimestampMs = System.currentTimeMillis())
+            }
+        }
+
+        nm.notify(CHARGING_ALARM_NOTIFICATION_ID, notifBuilder.build())
+    }
+
+    private fun playAlarmSound() {
+        runCatching {
+            val alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            alarmRingtone = RingtoneManager.getRingtone(context, alarmUri)?.apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    isLooping = true
+                }
+                play()
+            }
+            val v = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vm?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+            alarmVibrator = v
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                v?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 300, 500), 1))
+            } else {
+                @Suppress("DEPRECATION")
+                v?.vibrate(longArrayOf(0, 500, 300, 500), 1)
+            }
+        }
     }
 
     // Connection & Link StateFlows
@@ -356,6 +501,12 @@ class IqubeBleManager(
                 val now = System.currentTimeMillis()
                 if (tele.isCharging && tele.batteryPercent != null) {
                     val soc = tele.batteryPercent
+                    val alertCfg = _chargingAlertConfig.value
+                    if (alertCfg.isEnabled && !hasTriggeredChargingAlertForSession && soc >= alertCfg.targetPct) {
+                        hasTriggeredChargingAlertForSession = true
+                        triggerChargingAlert(soc)
+                    }
+
                     if (chargingSessionStartMs == null) {
                         chargingSessionStartMs = now
                         _chargingSessionStartSoc.value = soc
@@ -380,6 +531,8 @@ class IqubeBleManager(
                             lastChargingSocStepTimestampMs = now
                         }
                     }
+                } else {
+                    hasTriggeredChargingAlertForSession = false
                 }
 
                 // 3. Persist Last Seen Scooter State on telemetry updates
@@ -2270,6 +2423,9 @@ class IqubeBleManager(
     }
 
     companion object {
+        const val ACTION_STOP_CHARGING_ALARM = "com.example.ble.ACTION_STOP_CHARGING_ALARM"
+        const val CHARGING_ALARM_NOTIFICATION_ID = 5050
+
         @Volatile
         private var instance: IqubeBleManager? = null
 

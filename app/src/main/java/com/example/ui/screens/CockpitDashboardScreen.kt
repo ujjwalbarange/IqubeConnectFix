@@ -82,9 +82,16 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.AlarmOff
+import androidx.compose.material.icons.filled.BatteryAlert
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.ble.GoogleMapsNotificationListenerService
+import com.example.model.ChargingAlertConfig
+import com.example.model.ChargingAlertType
 import com.example.model.ChargingMonitorState
 import com.example.model.GoogleMapsListenerState
 import com.example.model.IncomingCallRelayState
@@ -165,6 +172,12 @@ fun CockpitDashboardScreen(
     autoReconnectEnabled: Boolean = true,
     onSetAutoReconnectEnabled: (Boolean) -> Unit = {},
     onRequestPhonePermissions: () -> Unit = {},
+    chargingAlertConfig: ChargingAlertConfig = ChargingAlertConfig(),
+    onSetChargingAlertEnabled: (Boolean) -> Unit = {},
+    onSetChargingAlertTargetPct: (Int) -> Unit = {},
+    onSetChargingAlertType: (ChargingAlertType) -> Unit = {},
+    onStopChargingAlarm: () -> Unit = {},
+    onTestChargingAlert: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -294,7 +307,13 @@ fun CockpitDashboardScreen(
                 onSetStatusNotificationsEnabled = onSetStatusNotificationsEnabled,
                 autoReconnectEnabled = autoReconnectEnabled,
                 onSetAutoReconnectEnabled = onSetAutoReconnectEnabled,
-                onRequestPhonePermissions = onRequestPhonePermissions
+                onRequestPhonePermissions = onRequestPhonePermissions,
+                chargingAlertConfig = chargingAlertConfig,
+                onSetChargingAlertEnabled = onSetChargingAlertEnabled,
+                onSetChargingAlertTargetPct = onSetChargingAlertTargetPct,
+                onSetChargingAlertType = onSetChargingAlertType,
+                onStopChargingAlarm = onStopChargingAlarm,
+                onTestChargingAlert = onTestChargingAlert
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -302,13 +321,20 @@ fun CockpitDashboardScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AppSettingsAndBackgroundSyncCard(
     statusNotificationsEnabled: Boolean,
     onSetStatusNotificationsEnabled: (Boolean) -> Unit,
     autoReconnectEnabled: Boolean,
     onSetAutoReconnectEnabled: (Boolean) -> Unit,
-    onRequestPhonePermissions: () -> Unit
+    onRequestPhonePermissions: () -> Unit,
+    chargingAlertConfig: ChargingAlertConfig,
+    onSetChargingAlertEnabled: (Boolean) -> Unit,
+    onSetChargingAlertTargetPct: (Int) -> Unit,
+    onSetChargingAlertType: (ChargingAlertType) -> Unit,
+    onStopChargingAlarm: () -> Unit,
+    onTestChargingAlert: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -344,7 +370,7 @@ private fun AppSettingsAndBackgroundSyncCard(
                     color = TextPrimary
                 )
                 Text(
-                    text = "Shows live battery %, cluster range, and True Range when connected, and last seen time with parked location when disconnected.",
+                    text = "Clean status notification showing live battery %, cluster range, and True Range when connected, or last seen time when disconnected.",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary
                 )
@@ -388,7 +414,227 @@ private fun AppSettingsAndBackgroundSyncCard(
             )
         }
 
-        // 3. Live Phone & Contact Alerts Permission
+        // 3. Smart Battery Charging Target Alert
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .border(1.dp, if (chargingAlertConfig.isAlarmRinging) EnergeticCoral else SlateBorder, RoundedCornerShape(12.dp))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Active Alarm Banner when ringing
+            if (chargingAlertConfig.isAlarmRinging) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(EnergeticCoral.copy(alpha = 0.2f))
+                        .border(1.dp, EnergeticCoral, RoundedCornerShape(8.dp))
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Alarm,
+                            contentDescription = "Alarm Active",
+                            tint = EnergeticCoral,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "🚨 Target Reached (${chargingAlertConfig.targetPct}%)!",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = EnergeticCoral
+                        )
+                    }
+                    Button(
+                        onClick = onStopChargingAlarm,
+                        colors = ButtonDefaults.buttonColors(containerColor = EnergeticCoral),
+                        modifier = Modifier.testTag("stop_charging_alarm_button")
+                    ) {
+                        Icon(Icons.Default.AlarmOff, contentDescription = "Stop", modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Stop Alarm", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "⚡ Charging Target SoC Alert",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Alerts you when the scooter charges to ${chargingAlertConfig.targetPct}% (80% optimal for battery lifespan).",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+                Switch(
+                    checked = chargingAlertConfig.isEnabled,
+                    onCheckedChange = onSetChargingAlertEnabled,
+                    modifier = Modifier.testTag("charging_alert_enabled_switch")
+                )
+            }
+
+            if (chargingAlertConfig.isEnabled) {
+                // Target SoC Chips
+                Text(
+                    text = "TARGET PERCENTAGE: ${chargingAlertConfig.targetPct}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = ElectricCyan
+                )
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(
+                        50 to "50%",
+                        80 to "80% (Health)",
+                        90 to "90%",
+                        100 to "100% (Full)"
+                    ).forEach { (pct, label) ->
+                        val isSelected = chargingAlertConfig.targetPct == pct
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) ElectricCyan.copy(alpha = 0.22f) else SlateSurface)
+                                .border(1.dp, if (isSelected) ElectricCyan else SlateBorder, RoundedCornerShape(8.dp))
+                                .clickable { onSetChargingAlertTargetPct(pct) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                .testTag("charging_target_chip_$pct")
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) ElectricCyan else TextPrimary
+                            )
+                        }
+                    }
+                }
+
+                Slider(
+                    value = chargingAlertConfig.targetPct.toFloat(),
+                    onValueChange = { onSetChargingAlertTargetPct(it.roundToInt()) },
+                    valueRange = 50f..100f,
+                    steps = 9,
+                    colors = SliderDefaults.colors(
+                        thumbColor = ElectricCyan,
+                        activeTrackColor = NeonMint
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("charging_target_slider")
+                )
+
+                // Alert Type Selector: Notification vs Alarm
+                Text(
+                    text = "ALERT TYPE",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = ElectricCyan
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val isNotification = chargingAlertConfig.alertType == ChargingAlertType.NOTIFICATION
+                    val isAlarm = chargingAlertConfig.alertType == ChargingAlertType.ALARM
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isNotification) ElectricCyan.copy(alpha = 0.2f) else SlateSurface)
+                            .border(1.dp, if (isNotification) ElectricCyan else SlateBorder, RoundedCornerShape(8.dp))
+                            .clickable { onSetChargingAlertType(ChargingAlertType.NOTIFICATION) }
+                            .padding(vertical = 10.dp, horizontal = 8.dp)
+                            .testTag("alert_type_notification_chip"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.NotificationsActive,
+                                contentDescription = "Notification",
+                                tint = if (isNotification) ElectricCyan else TextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Notification Only",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (isNotification) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isNotification) ElectricCyan else TextPrimary
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isAlarm) EnergeticCoral.copy(alpha = 0.2f) else SlateSurface)
+                            .border(1.dp, if (isAlarm) EnergeticCoral else SlateBorder, RoundedCornerShape(8.dp))
+                            .clickable { onSetChargingAlertType(ChargingAlertType.ALARM) }
+                            .padding(vertical = 10.dp, horizontal = 8.dp)
+                            .testTag("alert_type_alarm_chip"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.VolumeUp,
+                                contentDescription = "Sound Alarm",
+                                tint = if (isAlarm) EnergeticCoral else TextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Sound Alarm",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (isAlarm) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isAlarm) EnergeticCoral else TextPrimary
+                            )
+                        }
+                    }
+                }
+
+                // Test Alert Button
+                OutlinedButton(
+                    onClick = onTestChargingAlert,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("test_charging_alert_button")
+                ) {
+                    Text(
+                        text = "Test ${chargingAlertConfig.targetPct}% ${if (chargingAlertConfig.alertType == ChargingAlertType.ALARM) "Alarm" else "Notification"} Now",
+                        color = ElectricCyan,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        // 4. Live Phone & Contact Alerts Permission
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -423,7 +669,7 @@ private fun AppSettingsAndBackgroundSyncCard(
             }
         }
 
-        // 4. Home Screen Cockpit Widget Information Card
+        // 5. Home Screen Cockpit Widget Information Card
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -440,7 +686,30 @@ private fun AppSettingsAndBackgroundSyncCard(
                 color = ElectricCyan
             )
             Text(
-                text = "You can add the iQube Cockpit Widget to your home screen! It displays connection status, battery progress bar, cluster DTE, True Range (Eco & Power), and last seen parked location without opening the app.",
+                text = "Add the iQube Cockpit Widget to your home screen! It displays live battery %, cluster DTE, True Range, and when charging, shows live charging speed, time until 80%, and time to full.",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
+        }
+
+        // 6. Control Center / Quick Settings Tile Guide
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .border(1.dp, NeonMint.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "🎛️ Control Center Quick Settings Tile Available",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = NeonMint
+            )
+            Text(
+                text = "Swipe down twice from the top of your phone screen, tap the Edit (pencil) button, and drag the 'iQube Cockpit' tile into your active Quick Settings. You will see live battery % and range at a glance anytime!",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )

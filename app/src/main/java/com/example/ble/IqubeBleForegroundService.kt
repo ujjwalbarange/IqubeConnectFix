@@ -63,24 +63,36 @@ class IqubeBleForegroundService : Service() {
 
     private fun startInForeground() {
         val initialNotification = buildNotification(
-            title = "TVS iQube Connected",
-            contentText = "Active background connection • Ready for navigation",
-            isRiding = false
+            title = "TVS iQube Cockpit",
+            contentText = "Active background connection • Ready for telemetry",
+            isRiding = false,
+            isConnected = false
         )
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                var serviceType = 0
+                val hasBtConnect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    ContextCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                } else true
+                val hasLocation = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+                if (hasBtConnect) {
+                    serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 }
-                startForeground(NOTIFICATION_ID, initialNotification, serviceType)
+                if (hasLocation) {
+                    serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                }
+
+                if (serviceType != 0) {
+                    startForeground(NOTIFICATION_ID, initialNotification, serviceType)
+                } else {
+                    startForeground(NOTIFICATION_ID, initialNotification)
+                }
             } else {
                 startForeground(NOTIFICATION_ID, initialNotification)
             }
-        } catch (e: Exception) {
-            // Fallback for security restrictions
+        } catch (_: Exception) {
             runCatching { startForeground(NOTIFICATION_ID, initialNotification) }
         }
     }
@@ -128,21 +140,31 @@ class IqubeBleForegroundService : Service() {
                     BleConnectionPhase.STREAMING_ACTIVE,
                     BleConnectionPhase.REPLAYING_RIDING_LOG,
                     BleConnectionPhase.REPLAYING_CHARGING_LOG -> {
-                        val isNavActive = state.nav.distanceMeters > 0 && state.nav.streetName.isNotBlank()
-                        if (isNavActive) {
+                        val bat = state.tele.batteryPercent?.let { "$it%" } ?: "--%"
+                        val dte = state.tele.clusterRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
+                        val trueEco = state.trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
+                        val truePwr = state.trueRange.truePowerRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
+                        val spd = state.tele.speedKmh?.let { "${it} km/h" } ?: "0 km/h"
+
+                        if (state.tele.isCharging) {
+                            val charging = bleManager.chargingMonitorState.value
+                            val to80 = charging.remainingSecondsTo80?.let {
+                                val m = (it / 60).coerceAtLeast(1)
+                                if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
+                            } ?: "Estimating"
+                            val to100 = charging.remainingSecondsTo100?.let {
+                                val m = (it / 60).coerceAtLeast(1)
+                                if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
+                            } ?: "Estimating"
+
                             updateNotification(
-                                title = "iQube Navigation • ${state.nav.etaMinutes}m left",
-                                contentText = "${state.nav.selectedTurn.symbol} ${state.nav.selectedTurn.title} in ${state.nav.distanceMeters}m • ${state.nav.streetName}",
-                                subText = "Navigation",
-                                isRiding = (state.tele.speedKmh ?: 0) > 0,
+                                title = "TVS iQube Charging • $bat",
+                                contentText = "Range: $dte (True: $trueEco) • To 80%: $to80 • Full: $to100",
+                                subText = "Charging Active",
+                                isRiding = false,
                                 isConnected = true
                             )
                         } else {
-                            val bat = state.tele.batteryPercent?.let { "$it%" } ?: "--%"
-                            val dte = state.tele.clusterRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
-                            val trueEco = state.trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
-                            val truePwr = state.trueRange.truePowerRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
-                            val spd = state.tele.speedKmh?.let { "${it} km/h" } ?: "0 km/h"
                             updateNotification(
                                 title = "TVS iQube Connected • $spd",
                                 contentText = "Battery: $bat • Range: $dte (True Eco: $trueEco • Pwr: $truePwr)",
@@ -271,14 +293,26 @@ class IqubeBleForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "TVS iQube Background Connection",
+                "TVS iQube Status & Connection",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps Bluetooth connection and Google Maps navigation sync active in the background"
+                description = "Live scooter battery SoC, range, and connected status"
                 setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            val alertChannel = NotificationChannel(
+                CHARGING_ALERT_CHANNEL_ID,
+                "TVS iQube Charging Alert",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Audible alarm and notifications when battery reaches target charging SoC"
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 500, 200, 500, 200, 500)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
             manager?.createNotificationChannel(channel)
+            manager?.createNotificationChannel(alertChannel)
         }
     }
 
@@ -306,6 +340,7 @@ class IqubeBleForegroundService : Service() {
 
     companion object {
         const val CHANNEL_ID = "iqube_ble_foreground_channel"
+        const val CHARGING_ALERT_CHANNEL_ID = "iqube_charging_alert_channel"
         const val NOTIFICATION_ID = 4096
         const val ACTION_STOP_SERVICE = "com.example.ble.ACTION_STOP_SERVICE"
 

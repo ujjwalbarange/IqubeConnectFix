@@ -41,6 +41,7 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
             for (widgetId in allWidgetIds) {
                 updateAppWidget(context, appWidgetManager, widgetId)
             }
+            com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
         }
 
         private fun updateAppWidget(
@@ -76,8 +77,15 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
                 lastSeen?.locationName ?: "Dhantoli"
             }
 
+            val charging = bleManager.chargingMonitorState.value
+            val isCharging = tele.isCharging || charging.isCharging
+
             // Connection Status Badge
             when {
+                isCharging -> {
+                    views.setTextViewText(R.id.widget_status_badge, "⚡ Charging")
+                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#00E5FF")) // Electric Cyan
+                }
                 isConnected -> {
                     views.setTextViewText(R.id.widget_status_badge, "● Connected")
                     views.setTextColor(R.id.widget_status_badge, Color.parseColor("#00E676")) // Neon Mint
@@ -94,22 +102,55 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
 
             val devName = bleManager.connectedDeviceName.value.ifBlank { "TVSiQUBE" }
             views.setTextViewText(R.id.widget_title, "$devName Cockpit")
-            views.setTextViewText(R.id.widget_battery_pct, "$batteryPct%")
+            views.setTextViewText(
+                R.id.widget_battery_pct,
+                if (isCharging) "⚡ $batteryPct%" else "$batteryPct%"
+            )
             views.setProgressBar(R.id.widget_battery_bar, 100, batteryPct, false)
 
-            views.setTextViewText(
-                R.id.widget_cluster_range,
-                String.format(Locale.US, "DTE: %.0f km", clusterRangeKm)
-            )
+            if (isCharging) {
+                val to80Sec = charging.remainingSecondsTo80
+                val timeTo80Str = when {
+                    batteryPct >= 80 -> "To 80%: Done (≥80%)"
+                    to80Sec != null && to80Sec > 0 -> {
+                        val mins = (to80Sec / 60).coerceAtLeast(1)
+                        if (mins >= 60) "To 80%: ${mins / 60}h ${mins % 60}m" else "To 80%: ${mins}m"
+                    }
+                    else -> "To 80%: Estimating..."
+                }
 
-            views.setTextViewText(
-                R.id.widget_true_range,
-                String.format(Locale.US, "True: %.0f km (Eco) • %.0f km (Pwr)", ecoTrue, pwrTrue)
-            )
+                val toFullSec = charging.remainingSecondsTo100
+                val timeToFullStr = when {
+                    batteryPct >= 100 -> "Full: 100% Charged"
+                    toFullSec != null && toFullSec > 0 -> {
+                        val mins = (toFullSec / 60).coerceAtLeast(1)
+                        if (mins >= 60) "To Full: ${mins / 60}h ${mins % 60}m" else "To Full: ${mins}m"
+                    }
+                    else -> "To Full: Estimating..."
+                }
+
+                views.setTextViewText(R.id.widget_cluster_range, timeTo80Str)
+                views.setTextColor(R.id.widget_cluster_range, Color.parseColor("#00E676")) // Neon Mint
+                views.setTextViewText(R.id.widget_true_range, timeToFullStr)
+                views.setTextColor(R.id.widget_true_range, Color.parseColor("#00E5FF")) // Electric Cyan
+            } else {
+                views.setTextViewText(
+                    R.id.widget_cluster_range,
+                    String.format(Locale.US, "DTE: %.0f km", clusterRangeKm)
+                )
+                views.setTextColor(R.id.widget_cluster_range, Color.parseColor("#F1F5F9"))
+                views.setTextViewText(
+                    R.id.widget_true_range,
+                    String.format(Locale.US, "True: %.0f km (Eco) • %.0f km (Pwr)", ecoTrue, pwrTrue)
+                )
+                views.setTextColor(R.id.widget_true_range, Color.parseColor("#94A3B8"))
+            }
 
             views.setTextViewText(R.id.widget_location, "📍 $locality")
 
-            val timeStr = if (isConnected) {
+            val timeStr = if (isCharging) {
+                "⚡ Charging Active"
+            } else if (isConnected) {
                 "Live Telemetry"
             } else {
                 val ts = lastSeen?.timestampMs ?: System.currentTimeMillis()
