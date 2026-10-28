@@ -501,6 +501,10 @@ class IqubeBleManager(
         }
     }
 
+    fun setAutoReconnectEnabled(enabled: Boolean) {
+        setAutoReconnect(enabled)
+    }
+
     fun setHeartbeatEnabled(enabled: Boolean) {
         _heartbeatEnabled.value = enabled
     }
@@ -1142,10 +1146,6 @@ class IqubeBleManager(
                         runCatching { locManager.removeUpdates(this) }
                     }
                 }
-                @Deprecated("Deprecated in Java")
-                override fun onStatusChanged(p: String?, s: Int, e: Bundle?) {}
-                override fun onProviderEnabled(p: String) {}
-                override fun onProviderDisabled(p: String) {}
             }
 
             if (locManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {

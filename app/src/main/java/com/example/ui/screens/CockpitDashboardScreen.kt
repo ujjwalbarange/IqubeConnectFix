@@ -160,6 +160,11 @@ fun CockpitDashboardScreen(
     googleMapsListenerState: GoogleMapsListenerState = GoogleMapsListenerState(),
     onSetGoogleMapsAutoForward: (Boolean) -> Unit = {},
     onSimulateGoogleMapsNotificationClick: () -> Unit = {},
+    statusNotificationsEnabled: Boolean = true,
+    onSetStatusNotificationsEnabled: (Boolean) -> Unit = {},
+    autoReconnectEnabled: Boolean = true,
+    onSetAutoReconnectEnabled: (Boolean) -> Unit = {},
+    onRequestPhonePermissions: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -283,7 +288,162 @@ fun CockpitDashboardScreen(
                 onSyncClockNowClick = onSyncClockNowClick
             )
 
+            // 9. APP SETTINGS & BACKGROUND AUTOMATION CARD
+            AppSettingsAndBackgroundSyncCard(
+                statusNotificationsEnabled = statusNotificationsEnabled,
+                onSetStatusNotificationsEnabled = onSetStatusNotificationsEnabled,
+                autoReconnectEnabled = autoReconnectEnabled,
+                onSetAutoReconnectEnabled = onSetAutoReconnectEnabled,
+                onRequestPhonePermissions = onRequestPhonePermissions
+            )
+
             Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun AppSettingsAndBackgroundSyncCard(
+    statusNotificationsEnabled: Boolean,
+    onSetStatusNotificationsEnabled: (Boolean) -> Unit,
+    autoReconnectEnabled: Boolean,
+    onSetAutoReconnectEnabled: (Boolean) -> Unit,
+    onRequestPhonePermissions: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(SlateSurface)
+            .border(1.dp, SlateBorder, RoundedCornerShape(16.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text(
+            text = "SETTINGS & BACKGROUND AUTOMATION",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = ElectricCyan
+        )
+
+        // 1. Status & Disconnection Notifications Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Status & Connection Notifications",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "Shows live battery %, cluster range, and True Range when connected, and last seen time with parked location when disconnected.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = statusNotificationsEnabled,
+                onCheckedChange = onSetStatusNotificationsEnabled,
+                modifier = Modifier.testTag("status_notification_switch")
+            )
+        }
+
+        // 2. Persistent Auto-Reconnect Scanner Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Background Auto-Reconnect",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "Automatically scans for and reconnects to your TVS iQube when you approach the vehicle, even when the screen is off or the app is minimized.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = autoReconnectEnabled,
+                onCheckedChange = onSetAutoReconnectEnabled,
+                modifier = Modifier.testTag("auto_reconnect_switch")
+            )
+        }
+
+        // 3. Live Phone & Contact Alerts Permission
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "📞 Phone Call & Contact Alerts on Cluster",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimary
+            )
+            Text(
+                text = "When granted, incoming calls automatically display the caller's name on your scooter cluster banner in real-time, matching TVS SmartXonnect specifications.",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
+            Button(
+                onClick = onRequestPhonePermissions,
+                colors = ButtonDefaults.buttonColors(containerColor = NeonMint),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("grant_phone_permissions_button")
+            ) {
+                Text(
+                    text = "Grant Phone & Contacts Permissions",
+                    color = androidx.compose.ui.graphics.Color.Black,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // 4. Home Screen Cockpit Widget Information Card
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .border(1.dp, ElectricCyan.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "📱 Home Screen Cockpit Widget Available",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = ElectricCyan
+            )
+            Text(
+                text = "You can add the iQube Cockpit Widget to your home screen! It displays connection status, battery progress bar, cluster DTE, True Range (Eco & Power), and last seen parked location without opening the app.",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
         }
     }
 }

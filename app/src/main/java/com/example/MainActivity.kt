@@ -86,6 +86,7 @@ fun IqubeCompanionApp(
     val isLinkDegraded by viewModel.isLinkDegraded.collectAsStateWithLifecycle()
     val linkWarningMessage by viewModel.linkWarningMessage.collectAsStateWithLifecycle()
     val autoReconnectEnabled by viewModel.autoReconnectEnabled.collectAsStateWithLifecycle()
+    val statusNotificationsEnabled by viewModel.statusNotificationsEnabled.collectAsStateWithLifecycle()
     val heartbeatEnabled by viewModel.heartbeatEnabled.collectAsStateWithLifecycle()
     val autoLocationSyncEnabled by viewModel.autoLocationSyncEnabled.collectAsStateWithLifecycle()
     val fragmentedSliceTestEnabled by viewModel.fragmentedSliceTestEnabled.collectAsStateWithLifecycle()
@@ -117,6 +118,20 @@ fun IqubeCompanionApp(
     val currentGpsSpeedKmh by viewModel.currentGpsSpeedKmh.collectAsStateWithLifecycle()
     val lastParkedLocation by viewModel.lastParkedLocation.collectAsStateWithLifecycle()
     val gpsFusionSamples by viewModel.gpsFusionSamples.collectAsStateWithLifecycle()
+
+    val phoneCallPermissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ -> }
+
+    val requestPhonePermissions = {
+        phoneCallPermissionsLauncher.launch(
+            arrayOf(
+                Manifest.permission.READ_PHONE_STATE,
+                Manifest.permission.READ_CALL_LOG,
+                Manifest.permission.READ_CONTACTS
+            )
+        )
+    }
 
     val blePermissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -248,7 +263,12 @@ fun IqubeCompanionApp(
                                     onSyncClockNowClick = viewModel::syncClockToClusterNow,
                                     googleMapsListenerState = googleMapsListenerState,
                                     onSetGoogleMapsAutoForward = viewModel::setGoogleMapsAutoForwardEnabled,
-                                    onSimulateGoogleMapsNotificationClick = viewModel::simulateGoogleMapsSampleNotification
+                                    onSimulateGoogleMapsNotificationClick = viewModel::simulateGoogleMapsSampleNotification,
+                                    statusNotificationsEnabled = statusNotificationsEnabled,
+                                    onSetStatusNotificationsEnabled = viewModel::setStatusNotificationsEnabled,
+                                    autoReconnectEnabled = autoReconnectEnabled,
+                                    onSetAutoReconnectEnabled = viewModel::setAutoReconnectEnabled,
+                                    onRequestPhonePermissions = requestPhonePermissions
                                 )
                             }
                             DashboardDestination.SAVED_TRIPS -> {

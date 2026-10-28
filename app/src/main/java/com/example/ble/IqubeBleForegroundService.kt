@@ -96,13 +96,13 @@ class IqubeBleForegroundService : Service() {
                 bleManager.packetParser.telemetryState,
                 bleManager.navigationState,
                 bleManager.lastParkedLocation,
-                bleManager.trueRangeCalc,
+                bleManager.trueRangeState,
                 bleManager.statusNotificationsEnabled,
                 bleManager.autoReconnectEnabled
             ) { values ->
                 val phase = values[0] as BleConnectionPhase
                 val devName = values[1] as String
-                val tele = values[2] as com.example.model.IqubeTelemetryState
+                val tele = values[2] as com.example.model.TelemetryState
                 val nav = values[3] as com.example.model.NavigationManeuverState
                 val parked = values[4] as? com.example.model.LastParkedLocation
                 val trueRange = values[5] as com.example.model.TrueRangeCalculation
@@ -337,7 +337,7 @@ class IqubeBleForegroundService : Service() {
 private data class ForegroundStateSnapshot(
     val phase: BleConnectionPhase,
     val devName: String,
-    val tele: com.example.model.IqubeTelemetryState,
+    val tele: com.example.model.TelemetryState,
     val nav: com.example.model.NavigationManeuverState,
     val parked: com.example.model.LastParkedLocation?,
     val trueRange: com.example.model.TrueRangeCalculation,

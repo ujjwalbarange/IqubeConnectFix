@@ -67,7 +67,7 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
             val lastSeen = bleManager.lastSeenState.value
             val trueRange = bleManager.trueRangeState.value
 
-            val batteryPct = tele.batteryPercent ?: lastSeen?.batteryPercent ?: 93
+            val batteryPct = tele.batteryPercent ?: lastSeen?.batteryPct ?: 93
             val clusterRangeKm = tele.clusterRangeKm ?: lastSeen?.clusterRangeKm ?: 98.0
             val ecoTrue = trueRange.trueEcoRangeKm ?: (batteryPct * trueRange.ecoKmPerPct)
             val pwrTrue = trueRange.truePowerRangeKm ?: (batteryPct * trueRange.powerKmPerPct)

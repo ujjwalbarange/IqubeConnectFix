@@ -89,6 +89,18 @@ fun SavedTripsHistoryScreen(
     val clipboardManager = LocalClipboardManager.current
     var exportedPreview by remember { mutableStateOf<String?>(null) }
     var exportedFormatLabel by remember { mutableStateOf("") }
+    var selectedTripForDetails by remember { mutableStateOf<SavedTripRecord?>(null) }
+
+    if (selectedTripForDetails != null) {
+        TripDetailsDialog(
+            trip = selectedTripForDetails!!,
+            onDismiss = { selectedTripForDetails = null },
+            onDeleteClick = {
+                onDeleteTripClick(selectedTripForDetails!!.id)
+                selectedTripForDetails = null
+            }
+        )
+    }
 
     Column(
         modifier = modifier
@@ -344,6 +356,7 @@ fun SavedTripsHistoryScreen(
                 savedTrips.forEach { trip ->
                     SavedTripItemCard(
                         trip = trip,
+                        onTripClick = { selectedTripForDetails = trip },
                         onDeleteClick = { onDeleteTripClick(trip.id) }
                     )
                 }
@@ -355,6 +368,7 @@ fun SavedTripsHistoryScreen(
 @Composable
 private fun SavedTripItemCard(
     trip: SavedTripRecord,
+    onTripClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
     val dateFmt = remember(trip.startTimeMs) {
@@ -370,6 +384,7 @@ private fun SavedTripItemCard(
             .clip(RoundedCornerShape(16.dp))
             .background(SlateSurface)
             .border(1.dp, SlateBorder, RoundedCornerShape(16.dp))
+            .clickable { onTripClick() }
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -424,6 +439,30 @@ private fun SavedTripItemCard(
             )
         }
 
+        // Eco vs Power Mode Breakdown row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(SlateCardElevated)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            val ecoEff = if (trip.ecoBatteryUsedPct > 0) String.format(Locale.US, "%.2f km/%%", trip.ecoDistanceKm / trip.ecoBatteryUsedPct.toDouble()) else "1.00 km/%"
+            val pwrEff = if (trip.powerBatteryUsedPct > 0) String.format(Locale.US, "%.2f km/%%", trip.powerDistanceKm / trip.powerBatteryUsedPct.toDouble()) else "0.75 km/%"
+
+            Text(
+                text = "🌱 Eco: ${String.format(Locale.US, "%.1f", trip.ecoDistanceKm)} km (-${trip.ecoBatteryUsedPct}%) • $ecoEff",
+                style = MaterialTheme.typography.labelSmall,
+                color = NeonMint
+            )
+            Text(
+                text = "⚡ Pwr: ${String.format(Locale.US, "%.1f", trip.powerDistanceKm)} km (-${trip.powerBatteryUsedPct}%) • $pwrEff",
+                style = MaterialTheme.typography.labelSmall,
+                color = AmberWarning
+            )
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -444,52 +483,304 @@ private fun SavedTripItemCard(
             )
         }
 
-        // Go to Start Coordinate & Go to End Coordinate Google Maps Links
-        val context = LocalContext.current
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedButton(
-                onClick = { openCoordinatesOnMaps(context, trip.startLatitude, trip.startLongitude) },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("trip_start_coord_button_${trip.id}")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.LocationOn,
-                    contentDescription = "Go to Start Coordinate",
-                    tint = ElectricCyan,
-                    modifier = Modifier.size(14.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = String.format(Locale.US, "Start (%.4f, %.4f)", trip.startLatitude, trip.startLongitude),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = ElectricCyan
-                )
-            }
-            OutlinedButton(
-                onClick = { openCoordinatesOnMaps(context, trip.endLatitude, trip.endLongitude) },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("trip_end_coord_button_${trip.id}")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.LocationOn,
-                    contentDescription = "Go to End Coordinate",
-                    tint = NeonMint,
-                    modifier = Modifier.size(14.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = String.format(Locale.US, "End (%.4f, %.4f)", trip.endLatitude, trip.endLongitude),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = NeonMint
-                )
-            }
+            Text(
+                text = "ℹ️ Tap card for full details & 100% True Range",
+                style = MaterialTheme.typography.labelSmall,
+                color = ElectricCyan
+            )
+            Text(
+                text = "100% True Range: ${String.format(Locale.US, "%.1f km", trip.efficiencyKmPerPct * 100.0)}",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = NeonMint
+            )
         }
     }
+}
+
+@Composable
+private fun TripDetailsDialog(
+    trip: SavedTripRecord,
+    onDismiss: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val dateFmt = remember(trip.startTimeMs) {
+        SimpleDateFormat("dd MMMM yyyy, hh:mm:ss a", Locale.US).format(Date(trip.startTimeMs))
+    }
+    val endFmt = remember(trip.endTimeMs) {
+        SimpleDateFormat("hh:mm:ss a", Locale.US).format(Date(trip.endTimeMs))
+    }
+    val durationMin = trip.durationSeconds / 60
+    val durationSecRem = trip.durationSeconds % 60
+    val projected100PctTrueRange = String.format(Locale.US, "%.1f", trip.efficiencyKmPerPct * 100.0)
+
+    val ecoEff = if (trip.ecoBatteryUsedPct > 0 && trip.ecoDistanceKm > 0.0) {
+        trip.ecoDistanceKm / trip.ecoBatteryUsedPct.toDouble()
+    } else 1.00
+    val projectedEco100Pct = String.format(Locale.US, "%.1f", ecoEff * 100.0)
+
+    val powerEff = if (trip.powerBatteryUsedPct > 0 && trip.powerDistanceKm > 0.0) {
+        trip.powerDistanceKm / trip.powerBatteryUsedPct.toDouble()
+    } else 0.75
+    val projectedPower100Pct = String.format(Locale.US, "%.1f", powerEff * 100.0)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Trip Details & True Range",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Route Banner
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SlateCardElevated)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "ROUTE & DURATION",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    Text(
+                        text = "📍 Started: ${trip.startLocationName}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "🏁 Stopped: ${trip.endLocationName}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "📅 $dateFmt to $endFmt",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                    Text(
+                        text = "⏱ Duration: ${durationMin}m ${durationSecRem}s • Reason: ${trip.disconnectReason}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { openCoordinatesOnMaps(context, trip.startLatitude, trip.startLongitude) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.LocationOn, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Start Point", style = MaterialTheme.typography.labelSmall, color = ElectricCyan)
+                        }
+                        OutlinedButton(
+                            onClick = { openCoordinatesOnMaps(context, trip.endLatitude, trip.endLongitude) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.LocationOn, contentDescription = null, tint = NeonMint, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Stop Point", style = MaterialTheme.typography.labelSmall, color = NeonMint)
+                        }
+                    }
+                }
+
+                // Overall Ride Efficiency & 100% Projected True Range
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SlateCardElevated)
+                        .border(1.dp, NeonMint.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "RIDE EFFICIENCY & PROJECTED TRUE RANGE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonMint
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = String.format(Locale.US, "%.2f km", trip.distanceKm),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = ElectricCyan
+                            )
+                            Text("Distance", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        }
+                        Column {
+                            Text(
+                                text = "-${trip.batteryUsedPct}%",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = EnergeticCoral
+                            )
+                            Text("${trip.startBatteryPct}% → ${trip.endBatteryPct}%", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        }
+                        Column {
+                            Text(
+                                text = String.format(Locale.US, "%.2f km/%%", trip.efficiencyKmPerPct),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = AmberWarning
+                            )
+                            Text("Efficiency", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "🎯 Projected True Range at 100% SoC: $projected100PctTrueRange km",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonMint
+                    )
+                }
+
+                // Mode Breakdown: Eco Mode vs Power Mode
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SlateCardElevated)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "LEARNED MODE BREAKDOWN",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    // Eco Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("🌱 Eco Mode:", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = NeonMint)
+                        Text(
+                            "${String.format(Locale.US, "%.2f", trip.ecoDistanceKm)} km • -${trip.ecoBatteryUsedPct}% SoC",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimary
+                        )
+                    }
+                    Text(
+                        text = "• Eco Efficiency: ${String.format(Locale.US, "%.2f", ecoEff)} km/% → 100% Range: $projectedEco100Pct km",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    // Power Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("⚡ Power Mode:", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = AmberWarning)
+                        Text(
+                            "${String.format(Locale.US, "%.2f", trip.powerDistanceKm)} km • -${trip.powerBatteryUsedPct}% SoC",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimary
+                        )
+                    }
+                    Text(
+                        text = "• Power Efficiency: ${String.format(Locale.US, "%.2f", powerEff)} km/% → 100% Range: $projectedPower100Pct km",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+
+                // Speed & Odometer Telemetry
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SlateCardElevated)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "TELEMETRY & ODOMETER",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    Text(
+                        text = String.format(Locale.US, "ODO: %,.1f km → %,.1f km", trip.startOdometerKm, trip.endOdometerKm),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Peak Speed: ${trip.peakSpeedKmh} km/h • Avg Speed: ${trip.avgSpeedKmh} km/h",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Dominant Ride Mode: ${trip.rideMode.name}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan)
+            ) {
+                Text("Close", color = androidx.compose.ui.graphics.Color.Black, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDeleteClick,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = EnergeticCoral)
+            ) {
+                Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Delete Trip")
+            }
+        },
+        containerColor = SlateSurface,
+        shape = RoundedCornerShape(20.dp)
+    )
 }
 
 private fun openCoordinatesOnMaps(context: android.content.Context, lat: Double, lon: Double) {
