@@ -156,12 +156,12 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
         bleManager.endIncomingCallAlert()
     }
 
-    // Turn-by-Turn Navigation Injector (`0x5B 0x49` -> 400ms -> `0x5B 0x4E`)
+    // Turn-by-Turn Navigation Injector (`0x5B 0x4F` -> 400ms -> `0x5A/0x5B 0x4E`)
     fun sendNavigationManeuver(
         turn: TurnTypeConstant,
         distanceMeters: Int,
         unitByte: Byte = IqubeBleSpec.NAV_UNIT_METERS,
-        streetName: String,
+        streetName: String = "",
         etaMinutes: Int = navigationState.value.etaMinutes
     ) {
         bleManager.sendNavigationData(turn, distanceMeters, unitByte, streetName, etaMinutes)
@@ -169,6 +169,10 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
 
     fun toggleNavigationRouteSimulation() {
         bleManager.toggleNavigationRouteSimulation()
+    }
+
+    fun clearNavigationOnCluster() {
+        bleManager.clearNavigationOnCluster()
     }
 
     // Music Track Banner (`0x5B 0x62`), Handlebar Key (`0x5A 0x6B`), Rider Greeting (`0x5B 0x52`), & Phone Status (`0x5B 0x52 0x55`)

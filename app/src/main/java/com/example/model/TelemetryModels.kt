@@ -41,8 +41,9 @@ object IqubeBleSpec {
     // Outgoing Command Data IDs on 0x5352 (Handle 0x0022)
     const val DATA_ID_CALLER_43: Byte = 0x43       // 'C' — createMobileToClusterArray (0x5B 0x43)
     const val DATA_ID_NAV_MANEUVER_49: Byte = 0x49 // 'I' — Navigation Maneuver & Distance (0x5B 0x49)
-    const val DATA_ID_HEARTBEAT_4A: Byte = 0x4A    // 'J' — Clock Sync Heartbeat [JD (0x5B 0x4A 0x44)
-    const val DATA_ID_NAV_ASSIST_4E: Byte = 0x4E   // 'N' — Navigation Street / Dest Reached (0x5B 0x4E)
+    const val DATA_ID_HEARTBEAT_4A: Byte = 0x4A    // 'J' — sendIQubeMobileData (0x5B 0x4A)
+    const val DATA_ID_NAV_ASSIST_4E: Byte = 0x4E   // 'N' — byteArrayForNavigation control frame (0x5A 0x4E / 0x5B 0x4E)
+    const val DATA_ID_NAV_INSTRUCTION_4F: Byte = 0x4F // 'O' — byteArrayForNavigation instruction frame (0x5B 0x4F)
     const val DATA_ID_HANDSHAKE_52: Byte = 0x52    // 'R' — Handshake [RU (0x5B 0x52 0x55) & Rider Greeting (0x5B 0x52)
     const val DATA_ID_LOCATION_5C: Byte = 0x5C     // '\' — GPS Locality Text (0x5B 0x5C)
     const val DATA_ID_CALL_STATE_5D: Byte = 0x5D   // ']' — writeCallStateForIQube (0x5B 0x5D 0x43)
@@ -190,6 +191,7 @@ data class PhoneStatusState(
     val isBatteryOverrideEnabled: Boolean = false,
     val isPhoneCharging: Boolean = false,
     val signalBars: Int = 4,
+    val missedCallsCount: Int = 0,
     val lastPhoneStatusSyncMs: Long? = null,
     val lastClockSyncMs: Long? = null
 ) {

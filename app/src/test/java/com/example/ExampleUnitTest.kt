@@ -157,18 +157,27 @@ class ExampleUnitTest {
         assertEquals(1.toByte(), lowBattPhoneStatus[4]) // 1/4 battery bars at 20%
         assertEquals(4.toByte(), lowBattPhoneStatus[6]) // 4/4 cellular bars
 
-        // 2. Clock & Date Sync Heartbeat [J (0x5B, 0x4A, statusByte, hh, mm, ss, 0x01, DD, MM, YY, 0, battBars, ..., 0xFF)
-        val heartbeat = dispatcher.buildClockSyncPacket(batteryPct = 20, signalBars = 4)
+        // 2. Clock & Mobile Status Packet [J (BlePacketsProvider.sendIQubeMobileData: Byte[2]=(sig<<4)|batt, Byte[6..9]=12h HH:mm:ss AM/PM, Byte[10]=missedCalls)
+        val heartbeat = dispatcher.buildClockSyncPacket(batteryPct = 20, signalBars = 4, missedCallsCount = 0, activeCallState = 0)
         assertEquals(20, heartbeat.size)
-        assertEquals(0x14.toByte(), heartbeat[2]) // (1 << 4) | 4 = 0x14 (1/4 batt bars, 4/4 sig bars)
-        assertEquals(0x01.toByte(), heartbeat[6])
-        assertTrue(heartbeat[7] in 1..31)
-        assertTrue(heartbeat[8] in 1..12)
-        assertEquals(1.toByte(), heartbeat[11])
+        assertEquals(0x41.toByte(), heartbeat[2]) // (4 << 4) | 1 = 0x41 (4/4 sig bars, 1/4 batt bars at 20%)
+        assertEquals(0x78.toByte(), heartbeat[3])
+        assertEquals(0x81.toByte(), heartbeat[4])
+        assertEquals(0x02.toByte(), heartbeat[5])
+        assertTrue(heartbeat[6] in 1..12) // 12-hour clock hour (1..12)
+        assertTrue(heartbeat[7] in 0..59) // minute
+        assertTrue(heartbeat[8] in 0..59) // second
+        assertTrue(heartbeat[9].toInt() == 0 || heartbeat[9].toInt() == 1) // 0=PM, 1=AM
+        assertEquals(0.toByte(), heartbeat[10]) // missedCallsCount = 0 (does NOT turn on missed call icon!)
+        assertEquals(0.toByte(), heartbeat[12]) // activeCallState = 0
         assertEquals(0xFF.toByte(), heartbeat[19])
         assertTrue(dispatcher.validateOutgoingFrame(heartbeat).isSuccess)
 
-        // 3. Verified Trip Controls & Vehicle RTC Sync (createVehicleDataArray: 0x00=Trip A, 0x01=Trip B, 0x02=Reset)
+        val missedCallMobileData = dispatcher.buildClockSyncPacket(batteryPct = 85, signalBars = 4, missedCallsCount = 2, activeCallState = 0)
+        assertEquals(0x44.toByte(), missedCallMobileData[2]) // 4/4 sig bars, 4/4 batt bars
+        assertEquals(2.toByte(), missedCallMobileData[10])   // 2 missed calls turns on cluster missed call icon
+
+        // 3. Verified Trip Controls & Vehicle Date Sync (createVehicleDataArray: 0x00=Trip A, 0x01=Trip B, 0x02=Reset)
         val switchTripA = dispatcher.buildTripControlFrame(IqubeBleSpec.SUBCMD_SWITCH_TRIP_A)
         val switchTripB = dispatcher.buildTripControlFrame(IqubeBleSpec.SUBCMD_SWITCH_TRIP_B)
         val resetActive = dispatcher.buildTripControlFrame(IqubeBleSpec.SUBCMD_RESET_ACTIVE_TRIP)
@@ -179,9 +188,8 @@ class ExampleUnitTest {
         assertEquals(0x00.toByte(), switchTripA[12])
         assertEquals(0x02.toByte(), switchTripA[5])
         assertEquals(0x01.toByte(), switchTripA[14])
-        assertTrue(switchTripA[6] in 0..23) // Local HOUR_OF_DAY
-        assertTrue(switchTripA[7] in 0..59) // Local MINUTE
-        assertTrue(switchTripA[8] in 0..59) // Local SECOND
+        assertTrue(switchTripA[9] in 1..31)  // DAY_OF_MONTH
+        assertTrue(switchTripA[10] in 1..12) // MONTH
         assertEquals(0xFF.toByte(), switchTripA[19])
         assertEquals(0xFF.toByte(), switchTripB[19])
         assertEquals(0xFF.toByte(), resetActive[19])
@@ -223,30 +231,40 @@ class ExampleUnitTest {
         val outgoingStatePkt = dispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_OUTGOING)
         assertEquals(0x04.toByte(), outgoingStatePkt[3])
 
-        // 6. Turn-by-Turn Navigation 2-Packet Sequence (0x5B 0x49 + 0x5B 0x4E) with auto m/km scaling + ETA + active flag
-        val navPkt1Meters = dispatcher.buildNavigationManeuverPacket1(TurnTypeConstant.TURN_RIGHT.code, 250, 0x01, etaMinutes = 75)
-        assertEquals(0x5B.toByte(), navPkt1Meters[0])
-        assertEquals(0x49.toByte(), navPkt1Meters[1])
-        assertEquals(0x03.toByte(), navPkt1Meters[2]) // Turn Right = 0x03 in TurnTypeConstants.smali
-        assertEquals(0x00.toByte(), navPkt1Meters[3])
-        assertEquals(250.toByte(), navPkt1Meters[4])
-        assertEquals(0x01.toByte(), navPkt1Meters[5]) // Meters
-        assertEquals(1.toByte(), navPkt1Meters[6])    // ETA Hours (75 / 60 = 1)
-        assertEquals(15.toByte(), navPkt1Meters[7])   // ETA Mins (75 % 60 = 15)
-        assertEquals(0x01.toByte(), navPkt1Meters[8]) // Nav Active Flag
-        assertEquals(0xFF.toByte(), navPkt1Meters[19])
-        assertTrue(dispatcher.validateOutgoingFrame(navPkt1Meters).isSuccess)
+        // 6. Turn-by-Turn Navigation Sequence (0x5B 0x4F Instruction + 0x5A/0x5B 0x4E Binary Control Frame)
+        val navInst0x4F = dispatcher.buildNavigationInstructionPacket0x4F("Turn Right")
+        assertEquals(0x5B.toByte(), navInst0x4F[0])
+        assertEquals(0x4F.toByte(), navInst0x4F[1])
+        assertEquals("Turn Right", String(navInst0x4F, 2, 10, StandardCharsets.US_ASCII))
+        assertEquals(0xFF.toByte(), navInst0x4F[19])
+        assertTrue(dispatcher.validateOutgoingFrame(navInst0x4F).isSuccess)
 
-        val navPkt1Km = dispatcher.buildNavigationManeuverPacket1(TurnTypeConstant.CONTINUE_STRAIGHT.code, 1400, 0x01, etaMinutes = 12)
-        assertEquals(0x02.toByte(), navPkt1Km[5]) // Auto-scaled to 0x02 (0.1 km units)
-        assertEquals(14.toByte(), navPkt1Km[4])   // 1400m = 1.4 km = 14 tenths
+        val navCtrl0x4E = dispatcher.buildNavigationControlPacket0x4E(
+            turnCode = TurnTypeConstant.TURN_RIGHT.code,
+            distanceMeters = 250,
+            etaMinutes = 12,
+            totalRemainingDistanceMeters = 1500,
+            navActive = true,
+            headerByte = IqubeBleSpec.HEADER_TELEMETRY
+        )
+        assertEquals(0x5A.toByte(), navCtrl0x4E[0])
+        assertEquals(0x4E.toByte(), navCtrl0x4E[1])
+        assertEquals(0x00.toByte(), navCtrl0x4E[2])
+        assertEquals(250.toByte(), navCtrl0x4E[3]) // uint16 BE distance = 250m
+        assertEquals(0x00.toByte(), navCtrl0x4E[4])
+        assertEquals(12.toByte(), navCtrl0x4E[5])  // uint16 BE ETA minutes = 12 (never 0x5761 = 372h 49m!)
+        assertEquals(0x03.toByte(), navCtrl0x4E[9]) // Byte[9] = pictogram (0x03 = Turn Right)
+        assertEquals(0x01.toByte(), navCtrl0x4E[10])
+        assertEquals(0x01.toByte(), navCtrl0x4E[11]) // navOnOFF = 1
+        assertEquals(0xFF.toByte(), navCtrl0x4E[19])
+        assertTrue(dispatcher.validateOutgoingFrame(navCtrl0x4E).isSuccess)
 
-        val navPkt2 = dispatcher.buildNavigationStreetPacket2(TurnTypeConstant.TURN_RIGHT.code, "MG Road")
+        val navPkt2 = dispatcher.buildNavigationStreetPacket2(TurnTypeConstant.U_TURN.code, "", distanceMeters = 150, etaMinutes = 8)
         assertEquals(0x5B.toByte(), navPkt2[0])
         assertEquals(0x4E.toByte(), navPkt2[1])
-        assertEquals(0x4E.toByte(), navPkt2[2]) // 'N'
-        assertEquals(0x41.toByte(), navPkt2[3]) // 'A'
-        assertEquals("MG Road", String(navPkt2, 4, 7, StandardCharsets.US_ASCII))
+        assertEquals(150.toByte(), navPkt2[3])
+        assertEquals(8.toByte(), navPkt2[5])
+        assertEquals(0x06.toByte(), navPkt2[9]) // Byte[9] = 0x06 (U-Turn)
         assertEquals(0xFF.toByte(), navPkt2[19])
         assertTrue(dispatcher.validateOutgoingFrame(navPkt2).isSuccess)
 

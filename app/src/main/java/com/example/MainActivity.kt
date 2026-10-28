@@ -225,6 +225,7 @@ fun IqubeCompanionApp(
                                     onEndIncomingCallClick = { viewModel.endIncomingCallAlert() },
                                     onSendNavigationManeuver = viewModel::sendNavigationManeuver,
                                     onToggleNavigationRouteSim = viewModel::toggleNavigationRouteSimulation,
+                                    onClearNavigationClick = viewModel::clearNavigationOnCluster,
                                     onSimulateChargingStepClick = viewModel::simulateLiveOnePercentChargingStep,
                                     onToggleChargingClick = viewModel::toggleReplayChargingState,
                                     riderGreetingName = riderGreetingName,

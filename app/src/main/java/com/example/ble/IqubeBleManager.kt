@@ -503,7 +503,7 @@ class IqubeBleManager(
     }
 
     /**
-     * Dedicated Caller ID Banner (`0x5B 0x43` / `DATA_ID_CALLER_43` & `0x5B 0x5D 0x43`).
+     * Dedicated Incoming Caller ID Banner (`0x5B 0x43` / `DATA_ID_CALLER_43`, `0x5B 0x5D 0x43`, and `0x5B 0x4A` Byte 12 = 1).
      * Extracts caller's 1st Name (e.g. `"Rahul"` from `"Rahul Sharma"`), sends `callState = 0x00` (Ringing)
      * and `[0x5B, 0x43, ...utf8(firstName), ...0x00, 0xFF]`, and starts a 500 ms periodic repeat timer
      * (`iQubeCallerDataSendTimer`) while ringing so background GPS location writes (`0x5B 0x5C`) are paused.
@@ -524,12 +524,24 @@ class IqubeBleManager(
             ringStartTimeMs = System.currentTimeMillis()
         )
 
-        // 1. Send Call State Ringing (`0x5B 0x5D 0x43 0x00 ... 0xFF`)
+        val phoneState = _phoneStatusState.value
+        val battPct = if (phoneState.isBatteryOverrideEnabled) phoneState.phoneBatteryPct else readHardwarePhoneBatteryPercent()
+
+        // 1. Send Call State Ringing (`0x5B 0x5D 0x43 0x00 ... 0xFF`) + `0x5B 0x4A` with activeCallState = 1
         commandDispatcher.enqueueCommand(
             label = "Call State Incoming (5B 5D 43 00 … FF)",
             rawPayload = commandDispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_RINGING)
         )
-        // 2. Send Dedicated Caller ID Frame (`0x5B 0x43 <17B firstName> 0xFF`)
+        commandDispatcher.enqueueCommand(
+            label = "Mobile Data Call Active [J (5B 4A … Byte12=01)",
+            rawPayload = commandDispatcher.buildClockSyncPacket(
+                batteryPct = battPct,
+                signalBars = phoneState.signalBars,
+                missedCallsCount = phoneState.missedCallsCount,
+                activeCallState = 1
+            )
+        )
+        // 2. Send Dedicated Incoming Caller ID Frame (`0x5B 0x43 <17B firstName> 0xFF`)
         val callerPayload = commandDispatcher.buildCallerPacket0x43(cleaned, extractFirstWordOnly = true)
         commandDispatcher.enqueueCommand(
             label = "Incoming Caller ID [C $clusterCallText (5B 43 … FF)",
@@ -564,7 +576,8 @@ class IqubeBleManager(
     }
 
     /**
-     * Tests an Outgoing Call on the cluster (`0x5B 0x5D 0x43 0x04` / `0x01` + `"Call: <FirstName>"` on `0x5B 0x43` & `0x5B 0x5C`).
+     * Tests an Outgoing Call on the cluster (`0x5B 0x5D 0x43 0x04` + `"Call: <FirstName>"` on `0x5B 0x5C`
+     * without writing to `0x5B 0x43` so the cluster does NOT show the "Incoming" call tag).
      */
     fun triggerOutgoingCallAlert(fullCallerName: String) {
         val cleaned = fullCallerName.trim().ifBlank { "Rahul Sharma" }
@@ -583,13 +596,21 @@ class IqubeBleManager(
         )
         _lastSyncedClusterLocation.value = bannerText
 
+        val phoneState = _phoneStatusState.value
+        val battPct = if (phoneState.isBatteryOverrideEnabled) phoneState.phoneBatteryPct else readHardwarePhoneBatteryPercent()
+
         commandDispatcher.enqueueCommand(
             label = "Call State Outgoing (5B 5D 43 04 … FF)",
             rawPayload = commandDispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_OUTGOING)
         )
         commandDispatcher.enqueueCommand(
-            label = "Outgoing Call [C $bannerText (5B 43 … FF)",
-            rawPayload = commandDispatcher.buildCallerPacket0x43(bannerText, extractFirstWordOnly = false)
+            label = "Mobile Data Outgoing Call [J (5B 4A … Byte12=01)",
+            rawPayload = commandDispatcher.buildClockSyncPacket(
+                batteryPct = battPct,
+                signalBars = phoneState.signalBars,
+                missedCallsCount = phoneState.missedCallsCount,
+                activeCallState = 1
+            )
         )
         commandDispatcher.enqueueCommand(
             label = "Outgoing Banner [\\$bannerText (5B 5C … FF)",
@@ -597,21 +618,6 @@ class IqubeBleManager(
         )
 
         callerRepeatJob?.cancel()
-        callerRepeatJob = scope.launch {
-            while (isActive && _incomingCallState.value.isRinging) {
-                delay(IqubeBleSpec.CALLER_REPEAT_TIMER_MS)
-                if (_incomingCallState.value.isRinging && commandDispatcher.queueDepth.value <= 2) {
-                    commandDispatcher.enqueueCommand(
-                        label = "Outgoing Call Repeat [C $bannerText",
-                        rawPayload = commandDispatcher.buildCallerPacket0x43(bannerText, extractFirstWordOnly = false)
-                    )
-                    _incomingCallState.update {
-                        it.copy(packetsTransmittedCount = it.packetsTransmittedCount + 1)
-                    }
-                }
-            }
-        }
-
         callAutoClearJob?.cancel()
         callAutoClearJob = scope.launch {
             delay(15_000L)
@@ -622,7 +628,9 @@ class IqubeBleManager(
     }
 
     /**
-     * Tests a Missed Call notification on the cluster (`0x5B 0x5D 0x43 0x03` + `"Miss: <FirstName>"` on `0x5B 0x43` & `0x5B 0x5C`).
+     * Tests a Missed Call notification on the cluster:
+     * 1. Increments `missedCallsCount` (`Byte [10]` of `0x5B 0x4A` `sendIQubeMobileData`), which turns ON the Missed Call icon in the cluster top bar!
+     * 2. Sends `0x5B 0x5D 0x43 0x03` (`CALL_STATE_MISSED`) and `"Miss: <FirstName>"` on `0x5B 0x5C` (without writing `0x5B 0x43` so there is no "Incoming" tag).
      */
     fun triggerMissedCallAlert(fullCallerName: String) {
         callerRepeatJob?.cancel()
@@ -631,6 +639,9 @@ class IqubeBleManager(
         val firstName = cleaned.split(Regex("\\s+")).firstOrNull()?.replace(Regex("[^\\x20-\\x7E]"), "")?.ifBlank { "Caller" } ?: "Caller"
         val bannerText = "Miss: $firstName".take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
         lastBannerHoldUntilMs = System.currentTimeMillis() + 20_000L
+
+        val newMissedCount = (_phoneStatusState.value.missedCallsCount + 1).coerceIn(1, 99)
+        _phoneStatusState.update { it.copy(missedCallsCount = newMissedCount) }
 
         _incomingCallState.update {
             it.copy(
@@ -644,13 +655,23 @@ class IqubeBleManager(
         }
         _lastSyncedClusterLocation.value = bannerText
 
+        val phoneState = _phoneStatusState.value
+        val battPct = if (phoneState.isBatteryOverrideEnabled) phoneState.phoneBatteryPct else readHardwarePhoneBatteryPercent()
+
+        // 1. Send 0x5B 0x4A with Byte [10] = newMissedCount (lights up Missed Call icon on cluster!)
+        commandDispatcher.enqueueCommand(
+            label = "Missed Call Icon ON [J (5B 4A Byte10=$newMissedCount)",
+            rawPayload = commandDispatcher.buildClockSyncPacket(
+                batteryPct = battPct,
+                signalBars = phoneState.signalBars,
+                missedCallsCount = newMissedCount,
+                activeCallState = 0
+            )
+        )
+        // 2. Send Call State Missed (0x5B 0x5D 0x43 0x03) + Simple Banner (0x5B 0x5C)
         commandDispatcher.enqueueCommand(
             label = "Call State Missed (5B 5D 43 03 … FF)",
             rawPayload = commandDispatcher.buildCallStatePacket(IqubeBleSpec.CALL_STATE_MISSED)
-        )
-        commandDispatcher.enqueueCommand(
-            label = "Missed Call [C $bannerText (5B 43 … FF)",
-            rawPayload = commandDispatcher.buildCallerPacket0x43(bannerText, extractFirstWordOnly = false)
         )
         commandDispatcher.enqueueCommand(
             label = "Missed Call Banner [\\$bannerText (5B 5C … FF)",
@@ -659,87 +680,89 @@ class IqubeBleManager(
     }
 
     /**
-     * Ends the active call alert, cancels the 500 ms `iQubeCallerDataSendTimer`,
+     * Ends the active call alert and clears the Missed Call icon (`Byte [10] = 0x00`, `Byte [12] = 0x00` in `0x5B 0x4A`),
      * sends `callState = 0x02` (`Ended`), and immediately restores the live GPS locality (`0x5B 0x5C ... 0xFF`).
      */
     fun endIncomingCallAlert(callStateByte: Byte = IqubeBleSpec.CALL_STATE_ENDED) {
         callerRepeatJob?.cancel()
         callAutoClearJob?.cancel()
         lastBannerHoldUntilMs = 0L
+        _phoneStatusState.update { it.copy(missedCallsCount = 0) }
         val prev = _incomingCallState.value
         _incomingCallState.value = prev.copy(
             isRinging = false,
             callStateByte = callStateByte.toInt()
         )
+        val phoneState = _phoneStatusState.value
+        val battPct = if (phoneState.isBatteryOverrideEnabled) phoneState.phoneBatteryPct else readHardwarePhoneBatteryPercent()
+
         commandDispatcher.enqueueCommand(
             label = "Call State Ended (5B 5D 43 02 … FF)",
             rawPayload = commandDispatcher.buildCallStatePacket(callStateByte)
         )
+        commandDispatcher.enqueueCommand(
+            label = "Clear Missed Call & Call State [J (5B 4A Byte10=0)",
+            rawPayload = commandDispatcher.buildClockSyncPacket(
+                batteryPct = battPct,
+                signalBars = phoneState.signalBars,
+                missedCallsCount = 0,
+                activeCallState = 0
+            )
+        )
         dumpLocationToClusterNow()
     }
 
-    private fun formatTurnShortPrefix(turn: TurnTypeConstant): String = when (turn) {
-        TurnTypeConstant.TURN_LEFT -> "L"
-        TurnTypeConstant.TURN_SHARPLY_LEFT -> "ShL"
-        TurnTypeConstant.TURN_SLIGHTLY_LEFT -> "SlL"
-        TurnTypeConstant.TURN_RIGHT -> "R"
-        TurnTypeConstant.TURN_SHARPLY_RIGHT -> "ShR"
-        TurnTypeConstant.TURN_SLIGHTLY_RIGHT -> "SlR"
-        TurnTypeConstant.U_TURN -> "U-Trn"
-        TurnTypeConstant.CONTINUE_STRAIGHT -> "Str"
-        TurnTypeConstant.DESTINATION_REACHED -> "Dest"
-        TurnTypeConstant.KEEP_LEFT -> "KpL"
-        TurnTypeConstant.KEEP_RIGHT -> "KpR"
-        TurnTypeConstant.FORK_LEFT -> "FkL"
-        TurnTypeConstant.FORK_RIGHT -> "FkR"
-        TurnTypeConstant.ROUNDABOUT -> "Rnd"
-        TurnTypeConstant.ROTARY -> "Rot"
-        else -> "Nav"
-    }
-
     /**
-     * Turn-by-Turn Navigation Sequence (`sendNavigationData` from `BleEngine.smali` + U347 Banner Mirror):
-     * 1. Packet 1 (`0x5B 0x49`): Maneuver icon (`TurnTypeConstants.smali` `0x00..0x48`), uint16 BE distance,
-     *    unit (`0x01`=m, `0x02`=0.1 km), capped ETA (`Byte [6] = hrs`, `Byte [7] = mins`), and `Byte [8] = 0x01` (nav active).
+     * Bytecode-Verified Turn-by-Turn Navigation Sequence (`BleEngine.sendNavigationData` + `BleNavigationSendData$Companion.byteArrayForNavigation` at `0dcc78`):
+     * 1. Packet 1 (`pair.second` = `0x5B 0x4F`): `[0x5B, 0x4F, ...17B turnInstruction, 0xFF]`
      * 2. Pause `400 ms` (`0x190` ms).
-     * 3. Packet 2 (`0x5B 0x4E`): `"NA"` (`0x4E 0x41`) + 15-byte street name (or `0x00 0x00` + destination if `turnCode == 0x08`).
-     * 4. Also mirrors concise turn + distance + street text to `0x5B 0x5C` and `0x5B 0x43` while holding background GPS overwrites
-     *    so both graphical N282 clusters and text-banner U347 clusters immediately display the navigation maneuver.
+     * 3. Packet 2 (`pair.first` = `0x5A 0x4E` & `0x5B 0x4E`):
+     *    - `Byte [2..3]` = uint16 BE distance to next turn in meters (`distanceBytes`)
+     *    - `Byte [4..5]` = uint16 BE total ETA in minutes (`remainingTime`)
+     *    - `Byte [6..8]` = uint24 BE total remaining distance in meters (`remainingDistance`)
+     *    - `Byte [9]` = `turn.code` (`pictogram` `0x00..0x48`)
+     *    - `Byte [10] = 0x01` (`oneString`), `Byte [11] = 0x01` (`navOnOFF`)
+     *    Never writes navigation turns/distances into `0x5B 0x5C` (keeping the cluster's `📍` Location Pin clean).
      */
     fun sendNavigationData(
         turn: TurnTypeConstant,
         distanceMeters: Int,
         unitByte: Byte = IqubeBleSpec.NAV_UNIT_METERS,
-        streetName: String,
+        streetName: String = "",
         etaMinutes: Int = _navigationState.value.etaMinutes
     ) {
-        val cleanStreet = streetName.trim().ifBlank { "Wardha Rd" }.take(IqubeBleSpec.MAX_NAV_STREET_ASCII_BYTES)
         val clampedDist = distanceMeters.coerceIn(0, 65535)
         val safeEta = etaMinutes.coerceIn(0, 1439)
-        val unitInt = unitByte.toInt() and 0xFF
-        val pkt1 = commandDispatcher.buildNavigationManeuverPacket1(turn.code, clampedDist, unitInt, safeEta)
-        val pkt2 = commandDispatcher.buildNavigationStreetPacket2(turn.code, cleanStreet)
+        val remDistMeters = if (turn == TurnTypeConstant.DESTINATION_REACHED) 0 else max(clampedDist, clampedDist + 200)
+        val unitDisplayByte = if (clampedDist >= 1000) IqubeBleSpec.NAV_UNIT_KILOMETERS.toInt() else (unitByte.toInt() and 0xFF)
 
-        val distBanner = if (turn == TurnTypeConstant.DESTINATION_REACHED) {
-            "Dest $cleanStreet"
-        } else if (clampedDist < 1000) {
-            "${formatTurnShortPrefix(turn)} ${clampedDist}m $cleanStreet"
-        } else {
-            String.format(java.util.Locale.US, "%s %.1fkm %s", formatTurnShortPrefix(turn), clampedDist / 1000.0, cleanStreet)
-        }.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
-
-        lastBannerHoldUntilMs = System.currentTimeMillis() + 30_000L
-        _lastSyncedClusterLocation.value = distBanner
+        val pktInstruction0x4F = commandDispatcher.buildNavigationInstructionPacket0x4F(turn.title)
+        val pktControl0x5A4E = commandDispatcher.buildNavigationControlPacket0x4E(
+            turnCode = turn.code,
+            distanceMeters = clampedDist,
+            etaMinutes = safeEta,
+            totalRemainingDistanceMeters = remDistMeters,
+            navActive = true,
+            headerByte = IqubeBleSpec.HEADER_TELEMETRY // 0x5A 0x4E
+        )
+        val pktControl0x5B4E = commandDispatcher.buildNavigationControlPacket0x4E(
+            turnCode = turn.code,
+            distanceMeters = clampedDist,
+            etaMinutes = safeEta,
+            totalRemainingDistanceMeters = remDistMeters,
+            navActive = true,
+            headerByte = IqubeBleSpec.HEADER_ASCII_CMD // 0x5B 0x4E
+        )
 
         _navigationState.update {
             it.copy(
                 selectedTurn = turn,
                 distanceMeters = clampedDist,
-                unitByte = pkt1[5].toInt() and 0xFF,
+                unitByte = unitDisplayByte,
                 etaMinutes = safeEta,
-                streetName = cleanStreet,
-                lastPacket1Hex = pkt1.toHexString(),
-                lastPacket2Hex = pkt2.toHexString(),
+                streetName = turn.title,
+                lastPacket1Hex = pktInstruction0x4F.toHexString(),
+                lastPacket2Hex = pktControl0x5A4E.toHexString(),
                 lastSentTimestampMs = System.currentTimeMillis()
             )
         }
@@ -747,24 +770,24 @@ class IqubeBleManager(
         navSequenceJob?.cancel()
         navSequenceJob = scope.launch {
             commandDispatcher.enqueueCommand(
-                label = String.format("Nav Pkt1 [I %s (%dm, ETA %dm)", turn.title, clampedDist, safeEta),
-                rawPayload = pkt1
+                label = String.format("Nav Pkt1 [O %s (5B 4F … FF)", turn.title),
+                rawPayload = pktInstruction0x4F
             )
             delay(IqubeBleSpec.NAVIGATION_INTER_PACKET_DELAY_MS) // 400 ms (0x190 ms)
             commandDispatcher.enqueueCommand(
-                label = if (turn == TurnTypeConstant.DESTINATION_REACHED) "Nav Pkt2 [N Dest $cleanStreet" else "Nav Pkt2 [NNA $cleanStreet",
-                rawPayload = pkt2
+                label = String.format("Nav Pkt2 ZN %s (%dm, ETA %dm, Picto 0x%02X)", turn.title, clampedDist, safeEta, turn.code),
+                rawPayload = pktControl0x5A4E
             )
             commandDispatcher.enqueueCommand(
-                label = "Nav Banner [\\$distBanner (0x5B 0x5C)",
-                rawPayload = commandDispatcher.buildClusterLocationPacket(distBanner)
+                label = String.format("Nav Pkt2 [N %s (%dm, ETA %dm, Picto 0x%02X)", turn.title, clampedDist, safeEta, turn.code),
+                rawPayload = pktControl0x5B4E
             )
         }
     }
 
     /**
      * Toggles a 5-Step Turn-by-Turn Navigation route simulation that streams live distance
-     * countdowns, automatic `m` (`0x01`) vs `0.1 km` (`0x02`) unit scaling, and maneuver transitions onto the cluster.
+     * countdowns, ETA updates, and maneuver transitions onto the cluster without touching `0x5B 0x5C`.
      */
     fun toggleNavigationRouteSimulation() {
         if (_navigationState.value.isRouteSimulationRunning) {
@@ -774,13 +797,13 @@ class IqubeBleManager(
         _navigationState.update { it.copy(isRouteSimulationRunning = true, currentRouteStepIndex = 0, totalRouteSteps = 5) }
         navigationSimJob?.cancel()
         navigationSimJob = scope.launch {
-            data class SimStep(val turn: TurnTypeConstant, val distMeters: Int, val street: String, val etaMin: Int)
+            data class SimStep(val turn: TurnTypeConstant, val distMeters: Int, val etaMin: Int)
             val routeSteps = listOf(
-                SimStep(TurnTypeConstant.CONTINUE_STRAIGHT, 1200, "Wardha Rd", 12),
-                SimStep(TurnTypeConstant.CONTINUE_STRAIGHT, 800, "Wardha Rd", 9),
-                SimStep(TurnTypeConstant.TURN_RIGHT, 350, "MG Road", 5),
-                SimStep(TurnTypeConstant.TURN_LEFT, 150, "Sonegaon Rd", 2),
-                SimStep(TurnTypeConstant.DESTINATION_REACHED, 0, "Sonegaon Hub", 0)
+                SimStep(TurnTypeConstant.CONTINUE_STRAIGHT, 800, 12),
+                SimStep(TurnTypeConstant.TURN_RIGHT, 350, 9),
+                SimStep(TurnTypeConstant.TURN_LEFT, 150, 5),
+                SimStep(TurnTypeConstant.U_TURN, 80, 2),
+                SimStep(TurnTypeConstant.DESTINATION_REACHED, 10, 0)
             )
             var idx = 0
             while (isActive && _navigationState.value.isRouteSimulationRunning) {
@@ -791,7 +814,6 @@ class IqubeBleManager(
                     turn = step.turn,
                     distanceMeters = step.distMeters,
                     unitByte = IqubeBleSpec.NAV_UNIT_METERS,
-                    streetName = step.street,
                     etaMinutes = step.etaMin
                 )
                 idx++
@@ -802,8 +824,34 @@ class IqubeBleManager(
 
     fun stopNavigationRouteSimulation() {
         navigationSimJob?.cancel()
-        lastBannerHoldUntilMs = 0L
         _navigationState.update { it.copy(isRouteSimulationRunning = false) }
+    }
+
+    /**
+     * Stops route simulation and transmits `sendEndNavigationArray` (`0x5A 0x4E` & `0x5B 0x4E` with `navOnOFF = 0x00`)
+     * to close the navigation overlay on the cluster.
+     */
+    fun clearNavigationOnCluster() {
+        stopNavigationRouteSimulation()
+        navSequenceJob?.cancel()
+        val end5A = commandDispatcher.buildEndNavigationPacket(IqubeBleSpec.HEADER_TELEMETRY)
+        val end5B = commandDispatcher.buildEndNavigationPacket(IqubeBleSpec.HEADER_ASCII_CMD)
+        _navigationState.update {
+            it.copy(
+                isRouteSimulationRunning = false,
+                lastPacket1Hex = end5A.toHexString(),
+                lastPacket2Hex = end5B.toHexString(),
+                lastSentTimestampMs = System.currentTimeMillis()
+            )
+        }
+        commandDispatcher.enqueueCommand(
+            label = "End Navigation ZN (5A 4E Byte11=00 … FF)",
+            rawPayload = end5A
+        )
+        commandDispatcher.enqueueCommand(
+            label = "End Navigation [N (5B 4E Byte11=00 … FF)",
+            rawPayload = end5B
+        )
     }
 
     /**
@@ -1593,19 +1641,16 @@ class IqubeBleManager(
             rawPayload = commandDispatcher.buildPhoneStatusPacket(batteryPct, clampedSigBars)
         )
         commandDispatcher.enqueueCommand(
-            label = "Status Tray Sync [J (${batteryBars}/4 Batt • ${clampedSigBars}/4 Sig)",
+            label = "Status Tray Sync [J (${clampedSigBars}/4 Sig • ${batteryBars}/4 Batt)",
             rawPayload = commandDispatcher.buildClockSyncPacket(
                 batteryPct = batteryPct,
-                signalBars = clampedSigBars
+                signalBars = clampedSigBars,
+                missedCallsCount = currentState.missedCallsCount,
+                activeCallState = if (_incomingCallState.value.isRinging) 1 else 0
             )
         )
     }
 
-    /**
-     * Transmits `0x5B 0x4A` (`[0x5B, 0x4A, statusByte, hh, mm, ss, 0x01, DD, MM, YY, 0, battBars, 0..0, 0xFF]`)
-     * and, on manual/initial sync, also `0x5A 0xF1` (`createVehicleDataArray` with `p[6..11]` = `HH:mm:ss DD/MM/YY`)
-     * to synchronize the cluster's 24-hour local RTC clock & date on both U347 and N282 firmware.
-     */
     fun syncClockToClusterNow(isBackgroundHeartbeat: Boolean = false) {
         val now = System.currentTimeMillis()
         val state = _phoneStatusState.value
@@ -1619,13 +1664,15 @@ class IqubeBleManager(
         }
         commandDispatcher.enqueueCommand(
             label = if (isBackgroundHeartbeat) {
-                "Clock Heartbeat [J (${batteryBars}/4 Batt • 24h Sync)"
+                "Clock Heartbeat [J (${state.signalBars}/4 Sig • ${batteryBars}/4 Batt)"
             } else {
-                "Clock & Date Sync [J (0x5B 0x4A • ${batteryBars}/4 Bars)"
+                "Clock & Date Sync [J (0x5B 0x4A • ${batteryBars}/4 Batt Bars)"
             },
             rawPayload = commandDispatcher.buildClockSyncPacket(
                 batteryPct = batteryPct,
-                signalBars = state.signalBars
+                signalBars = state.signalBars,
+                missedCallsCount = state.missedCallsCount,
+                activeCallState = if (_incomingCallState.value.isRinging) 1 else 0
             )
         )
         if (!isBackgroundHeartbeat) {
@@ -1636,42 +1683,39 @@ class IqubeBleManager(
                 _tripSubcommandConfig.value.switchTripAByte.toByte()
             }
             commandDispatcher.enqueueCommand(
-                label = "Vehicle RTC Time Sync (0x5A 0xF1 HH:mm:ss DD/MM/YY)",
+                label = "Vehicle Date Sync (0x5A 0xF1 DD/MM/YY)",
                 rawPayload = commandDispatcher.buildTripControlFrame(subCmd)
             )
         }
     }
 
     /**
-     * Shows the simple song name directly in the cluster's text banner using `0x5B 0x62` (`SONG_NAME_PACKET`),
-     * `0x5B 0x5C` (Cluster Banner), and `0x5B 0x43` (Text Alert Banner), or restores the GPS locality banner when cleared.
+     * Shows the simple song name directly in the cluster's text banner using `0x5B 0x5C` (Cluster Simple Banner)
+     * and `0x5B 0x62` (`SONG_NAME_PACKET`) — NEVER `0x5B 0x43`, so the song name never shows an "Incoming" call tag!
      */
     fun sendMusicTrackToCluster(songTitle: String, artistName: String = _mediaPlayerState.value.artistName, isPlaying: Boolean = true) {
         val cleaned = songTitle.replace(Regex("[^\\x20-\\x7E]"), "").trim().ifEmpty { "Midnight City" }.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
         _musicTrackTitle.value = cleaned
-        val pkt = commandDispatcher.buildMusicTrackPacket(cleaned)
+        val locationBannerPkt = commandDispatcher.buildClusterLocationPacket(cleaned)
+        val songPkt = commandDispatcher.buildMusicTrackPacket(cleaned)
         _mediaPlayerState.update {
             it.copy(
                 trackTitle = cleaned,
                 artistName = artistName.ifBlank { "Banner" },
                 isPlaying = isPlaying,
-                lastSentBannerHex = pkt.toHexString()
+                lastSentBannerHex = locationBannerPkt.toHexString()
             )
         }
         if (isPlaying) {
             lastBannerHoldUntilMs = System.currentTimeMillis() + 60_000L
             _lastSyncedClusterLocation.value = cleaned
             commandDispatcher.enqueueCommand(
-                label = "Song Name [b $cleaned (0x5B 0x62)",
-                rawPayload = pkt
-            )
-            commandDispatcher.enqueueCommand(
                 label = "Song Banner [\\$cleaned (0x5B 0x5C)",
-                rawPayload = commandDispatcher.buildClusterLocationPacket(cleaned)
+                rawPayload = locationBannerPkt
             )
             commandDispatcher.enqueueCommand(
-                label = "Song Text [C $cleaned (0x5B 0x43)",
-                rawPayload = commandDispatcher.buildCallerPacket0x43(cleaned, extractFirstWordOnly = false)
+                label = "Song Name [b $cleaned (0x5B 0x62)",
+                rawPayload = songPkt
             )
         } else {
             lastBannerHoldUntilMs = 0L

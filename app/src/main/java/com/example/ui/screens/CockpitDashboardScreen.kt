@@ -141,6 +141,7 @@ fun CockpitDashboardScreen(
     onEndIncomingCallClick: () -> Unit,
     onSendNavigationManeuver: (TurnTypeConstant, Int, Byte, String, Int) -> Unit,
     onToggleNavigationRouteSim: () -> Unit,
+    onClearNavigationClick: () -> Unit = {},
     onSimulateChargingStepClick: () -> Unit,
     onToggleChargingClick: () -> Unit,
     riderGreetingName: String = "Rider",
@@ -227,11 +228,12 @@ fun CockpitDashboardScreen(
                 onResetActiveTripClick = onResetActiveTripClick
             )
 
-            // 5. TURN-BY-TURN NAVIGATION 2-PACKET INJECTOR (`0x5B 0x49` -> 400ms -> `0x5B 0x4E`)
+            // 5. TURN-BY-TURN NAVIGATION INJECTOR (`0x5B 0x4F` -> 400ms -> `0x5A/0x5B 0x4E`)
             TurnByTurnNavigationInjectorCard(
                 navigationState = navigationState,
                 onSendManeuver = onSendNavigationManeuver,
-                onToggleRouteSimulation = onToggleNavigationRouteSim
+                onToggleRouteSimulation = onToggleNavigationRouteSim,
+                onClearNavigation = onClearNavigationClick
             )
 
             // 6. LIVE CLUSTER LOCATION SYNC CARD (Top Location Line `0x5B 0x5C` vs Lower Cyan Banner `0x5B 0x43`/`0x5B 0x62`)
@@ -1531,7 +1533,8 @@ private fun ClusterLocationSyncCard(
 private fun TurnByTurnNavigationInjectorCard(
     navigationState: NavigationManeuverState,
     onSendManeuver: (TurnTypeConstant, Int, Byte, String, Int) -> Unit,
-    onToggleRouteSimulation: () -> Unit
+    onToggleRouteSimulation: () -> Unit,
+    onClearNavigation: () -> Unit = {}
 ) {
     var selectedTurn by remember(navigationState.selectedTurn) { mutableStateOf(navigationState.selectedTurn) }
     var distanceInput by remember(navigationState.distanceMeters) { mutableStateOf(navigationState.distanceMeters.toString()) }
@@ -1539,7 +1542,6 @@ private fun TurnByTurnNavigationInjectorCard(
         mutableFloatStateOf(navigationState.distanceMeters.coerceIn(0, 5000).toFloat())
     }
     var etaInput by remember(navigationState.etaMinutes) { mutableStateOf(navigationState.etaMinutes.toString()) }
-    var streetInput by remember(navigationState.streetName) { mutableStateOf(navigationState.streetName) }
     var dropdownExpanded by remember { mutableStateOf(false) }
 
     val quickManeuvers = remember {
@@ -1558,13 +1560,13 @@ private fun TurnByTurnNavigationInjectorCard(
     val currentDistMeters = distanceInput.toIntOrNull() ?: distanceSliderVal.roundToInt()
     val isAutoKmScaled = currentDistMeters >= 1000
     val formattedDistanceLabel = if (isAutoKmScaled) {
-        String.format(Locale.US, "%.1f km (Byte[5]=0x02)", currentDistMeters / 100.0 / 10.0 * 10.0)
+        String.format(Locale.US, "%.1f km (%d m in B2..3)", currentDistMeters / 1000.0, currentDistMeters)
     } else {
-        String.format(Locale.US, "%d m (Byte[5]=0x01)", currentDistMeters)
+        String.format(Locale.US, "%d meters (B2..3)", currentDistMeters)
     }
     val currentEtaMins = (etaInput.toIntOrNull() ?: 12).coerceIn(0, 1439)
-    val etaHrsByte = (currentEtaMins / 60) and 0xFF
-    val etaMinsByte = (currentEtaMins % 60) and 0xFF
+    val etaHrsDisplay = currentEtaMins / 60
+    val etaMinsDisplay = currentEtaMins % 60
 
     Column(
         modifier = Modifier
@@ -1595,12 +1597,12 @@ private fun TurnByTurnNavigationInjectorCard(
                 Spacer(modifier = Modifier.width(6.dp))
                 Column {
                     Text(
-                        text = "TURN-BY-TURN NAVIGATION (0x5B 0x49 → 400ms → 0x5B 0x4E)",
+                        text = "TURN-BY-TURN NAVIGATION (0x5B 0x4F → 400ms → 0x5A/0x5B 0x4E)",
                         style = MaterialTheme.typography.labelMedium,
                         color = NeonMint
                     )
                     Text(
-                        text = "Auto m (0x01) / 0.1 km (0x02) scaling • Capped ETA (B6=${etaHrsByte}h, B7=${etaMinsByte}m)",
+                        text = "B2..3 Dist (${currentDistMeters}m) • B4..5 ETA (${currentEtaMins}m = ${etaHrsDisplay}h ${etaMinsDisplay}m) • B9 Picto (0x${String.format("%02X", selectedTurn.code)})",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextSecondary
                     )
@@ -1634,7 +1636,7 @@ private fun TurnByTurnNavigationInjectorCard(
                 Text(
                     text = String.format(
                         Locale.US,
-                        "Maneuver Opcode: %s %s (Byte[2] = 0x%02X) — Tap to Choose All 22 Turns",
+                        "Maneuver Icon: %s %s (Byte[9] = 0x%02X) — Tap to Choose All 22 Turns",
                         selectedTurn.symbol,
                         selectedTurn.title,
                         selectedTurn.code
@@ -1664,6 +1666,8 @@ private fun TurnByTurnNavigationInjectorCard(
                         onClick = {
                             selectedTurn = turnItem
                             dropdownExpanded = false
+                            val dist = distanceInput.toIntOrNull() ?: 250
+                            onSendManeuver(turnItem, dist, IqubeBleSpec.NAV_UNIT_METERS, "", currentEtaMins)
                         }
                     )
                 }
@@ -1685,7 +1689,7 @@ private fun TurnByTurnNavigationInjectorCard(
                         .clickable {
                             selectedTurn = maneuver
                             val dist = distanceInput.toIntOrNull() ?: 250
-                            onSendManeuver(maneuver, dist, IqubeBleSpec.NAV_UNIT_METERS, streetInput, currentEtaMins)
+                            onSendManeuver(maneuver, dist, IqubeBleSpec.NAV_UNIT_METERS, "", currentEtaMins)
                         }
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                         .testTag("nav_maneuver_chip_${maneuver.code}")
@@ -1720,7 +1724,7 @@ private fun TurnByTurnNavigationInjectorCard(
                     color = if (isAutoKmScaled) AmberWarning else NeonMint
                 )
                 Text(
-                    text = "ETA: ${etaHrsByte}h ${etaMinsByte}m (B6..7)",
+                    text = "ETA: ${etaHrsDisplay}h ${etaMinsDisplay}m (B4..5=${currentEtaMins}m)",
                     style = MaterialTheme.typography.labelSmall,
                     color = ElectricCyan
                 )
@@ -1755,29 +1759,20 @@ private fun TurnByTurnNavigationInjectorCard(
                         distanceSliderVal = d.coerceIn(0, 5000).toFloat()
                     }
                 },
-                label = { Text("Dist (m)") },
+                label = { Text("Distance to Turn (m)") },
                 singleLine = true,
                 modifier = Modifier
-                    .weight(0.85f)
+                    .weight(1f)
                     .testTag("nav_distance_input")
             )
             OutlinedTextField(
                 value = etaInput,
                 onValueChange = { etaInput = it.filter { ch -> ch.isDigit() }.take(4) },
-                label = { Text("ETA (min)") },
+                label = { Text("Total ETA (mins)") },
                 singleLine = true,
                 modifier = Modifier
-                    .weight(0.75f)
+                    .weight(1f)
                     .testTag("nav_eta_input")
-            )
-            OutlinedTextField(
-                value = streetInput,
-                onValueChange = { streetInput = it.take(IqubeBleSpec.MAX_NAV_STREET_ASCII_BYTES) },
-                label = { Text("Street / Dest (15B)") },
-                singleLine = true,
-                modifier = Modifier
-                    .weight(1.4f)
-                    .testTag("nav_street_input")
             )
         }
 
@@ -1790,43 +1785,60 @@ private fun TurnByTurnNavigationInjectorCard(
                     .padding(10.dp)
             ) {
                 Text(
-                    text = "Pkt 1 (0x5B 0x49): ${navigationState.lastPacket1Hex}",
+                    text = "Pkt 1 (0x5B 0x4F): ${navigationState.lastPacket1Hex}",
                     style = MaterialTheme.typography.labelSmall,
                     color = ElectricCyan
                 )
                 Text(
-                    text = "Pkt 2 (0x5B 0x4E +400ms): ${navigationState.lastPacket2Hex}",
+                    text = "Pkt 2 (0x5A/0x5B 0x4E +400ms): ${navigationState.lastPacket2Hex}",
                     style = MaterialTheme.typography.labelSmall,
                     color = NeonMint
                 )
             }
         }
 
-        Button(
-            onClick = {
-                val dist = distanceInput.toIntOrNull() ?: 250
-                onSendManeuver(selectedTurn, dist, IqubeBleSpec.NAV_UNIT_METERS, streetInput, currentEtaMins)
-            },
-            colors = ButtonDefaults.buttonColors(containerColor = NeonMint, contentColor = SlateSurface),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("send_nav_sequence_button")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send Maneuver to Cluster", modifier = Modifier.size(16.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = String.format(
-                    Locale.US,
-                    "Send Maneuver to Cluster: %s (0x%02X) • %s • ETA %dm • \"%s\"",
-                    selectedTurn.title,
-                    selectedTurn.code,
-                    if (currentDistMeters >= 1000) String.format(Locale.US, "%.1fkm", currentDistMeters / 1000.0) else "${currentDistMeters}m",
-                    currentEtaMins,
-                    streetInput.take(15)
-                ),
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Button(
+                onClick = {
+                    val dist = distanceInput.toIntOrNull() ?: 250
+                    onSendManeuver(selectedTurn, dist, IqubeBleSpec.NAV_UNIT_METERS, "", currentEtaMins)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonMint, contentColor = SlateSurface),
+                modifier = Modifier
+                    .weight(1.4f)
+                    .testTag("send_nav_sequence_button")
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send Maneuver to Cluster", modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = String.format(
+                        Locale.US,
+                        "Send Maneuver: %s (0x%02X) • %s • ETA %dm",
+                        selectedTurn.title,
+                        selectedTurn.code,
+                        if (currentDistMeters >= 1000) String.format(Locale.US, "%.1fkm", currentDistMeters / 1000.0) else "${currentDistMeters}m",
+                        currentEtaMins
+                    ),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            OutlinedButton(
+                onClick = onClearNavigation,
+                modifier = Modifier
+                    .weight(0.6f)
+                    .testTag("clear_nav_button")
+            ) {
+                Text(
+                    text = "End Nav",
+                    color = EnergeticCoral,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
@@ -2069,15 +2081,15 @@ private fun ClusterMusicAndRiderGreetingCard(
             .testTag("music_rider_greeting_card"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Section A: Simple Song Name in Cluster Banner (0x5B 0x62 + 0x5B 0x5C + 0x5B 0x43)
+        // Section A: Simple Song Name in Cluster Banner (0x5B 0x5C + 0x5B 0x62 — NO INCOMING TAG)
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                text = "SIMPLE SONG NAME IN CLUSTER BANNER (0x5B 0x62 • 0x5B 0x5C • 0x5B 0x43)",
+                text = "SIMPLE SONG NAME IN CLUSTER BANNER (0x5B 0x5C • 0x5B 0x62 — NO INCOMING TAG)",
                 style = MaterialTheme.typography.labelMedium,
                 color = NeonMint
             )
             Text(
-                text = "Displays simple song title text directly in the cluster banner (up to 17 ASCII chars)",
+                text = "Displays simple song title text directly in the cluster banner without triggering Incoming Call (0x43)",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
@@ -2127,7 +2139,7 @@ private fun ClusterMusicAndRiderGreetingCard(
             }
         }
 
-        // Section B: Phone Battery & Status Tray Sync (0x5B 0x52 0x55 & 0x5B 0x4A) + Local 24h Clock & RTC Sync (0x5A 0xF1)
+        // Section B: Phone Battery & Status Tray Sync (0x5B 0x4A Byte[2]=(Sig<<4)|Batt & Byte[6..9]=12h AM/PM Clock)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2137,18 +2149,18 @@ private fun ClusterMusicAndRiderGreetingCard(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "PHONE BATTERY BARS (0x5B 0x52 0x55 & 0x5B 0x4A) & 24H CLOCK / RTC SYNC (0x5A 0xF1)",
+                text = "PHONE BATTERY BARS (0x5B 0x4A Byte[2]=(Sig<<4)|Batt) & 12H AM/PM CLOCK SYNC",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 color = ElectricCyan
             )
             Text(
-                text = "Phone Battery: $livePct% → $liveBars/4 Bars (20% = 1/4 Bar)  |  Cluster Clock: Synced ($lastClockStr)",
+                text = "Phone Battery: $livePct% → $liveBars/4 Bars (Byte[10]=0 MissedCalls)  |  Clock: Synced ($lastClockStr)",
                 style = MaterialTheme.typography.labelSmall,
                 color = NeonMint
             )
 
-            // Quick Battery Bar Test Chips (20% = 1/4, 45% = 2/4, 70% = 3/4, 90% = 4/4)
+            // Quick Battery Bar Test Chips (10% = 0/4, 20% = 1/4, 45% = 2/4, 70% = 3/4, 90% = 4/4)
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -2222,7 +2234,7 @@ private fun ClusterMusicAndRiderGreetingCard(
                     Icon(Icons.Default.AccessTime, contentDescription = "Sync Clock", tint = ElectricCyan, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Sync 24h Clock Now",
+                        text = "Sync Clock Now",
                         color = ElectricCyan,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold
