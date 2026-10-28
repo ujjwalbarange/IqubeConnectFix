@@ -26,6 +26,7 @@ import android.os.Looper
 import com.example.model.ActiveTripSession
 import com.example.model.BleConnectionPhase
 import com.example.model.ChargingMonitorState
+import com.example.model.GoogleMapsListenerState
 import com.example.model.GpsBleFusionSample
 import com.example.model.IncomingCallRelayState
 import com.example.model.IqubeBleSpec
@@ -72,7 +73,7 @@ class IqubeBleManager(
     private val context: Context,
     val packetParser: IqubePacketParser = IqubePacketParser(),
     val tripRepository: TrueRangeAndTripRepository = TrueRangeAndTripRepository(context)
-) {
+) : VehicleNavigationHandler {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val bluetoothManager: BluetoothManager? =
@@ -152,9 +153,11 @@ class IqubeBleManager(
     private val _incomingCallState = MutableStateFlow(IncomingCallRelayState())
     val incomingCallState: StateFlow<IncomingCallRelayState> = _incomingCallState.asStateFlow()
 
-    // Turn-by-Turn Navigation Injector State (`0x5B 0x49` -> 400ms -> `0x5B 0x4E`)
+    // Turn-by-Turn Navigation Injector State (`0x5B 0x49` -> 400ms -> `0x5B 0x4E`) & Google Maps Listener State
     private val _navigationState = MutableStateFlow(NavigationManeuverState())
     val navigationState: StateFlow<NavigationManeuverState> = _navigationState.asStateFlow()
+    val googleMapsListenerState: StateFlow<GoogleMapsListenerState> = GoogleMapsNotificationListenerService.listenerState
+    private var sampleGoogleMapsStepIndex = 0
 
     // Rider Greeting Name (`0x5B 0x52`) & Media Player / Track Banner (`0x5B 0x62` & `0x5A 0x6B`)
     private val _riderGreetingName = MutableStateFlow(tripRepository.loadRiderName())
@@ -312,6 +315,9 @@ class IqubeBleManager(
     }
 
     init {
+        // Register as the active VehicleNavigationHandler for GoogleMapsNotificationListenerService
+        GoogleMapsNotificationListenerService.registerVehicleNavigationHandler(this)
+
         // Wire Handlebar Media Control listener (`0x5A 0x6B`)
         packetParser.onMediaCommandReceived = { cmd, ts ->
             handleIncomingMediaCommand(cmd, ts)
@@ -851,6 +857,100 @@ class IqubeBleManager(
         commandDispatcher.enqueueCommand(
             label = "End Navigation [N (5B 4E Byte11=00 … FF)",
             rawPayload = end5B
+        )
+    }
+
+    /**
+     * VehicleNavigationHandler implementation invoked asynchronously by [GoogleMapsNotificationListenerService]
+     * whenever an ongoing Google Maps navigation notification changes direction, distance, or ETA.
+     */
+    override fun onNavigationUpdated(
+        direction: TurnTypeConstant,
+        distanceMeters: Int,
+        etaHours: Int,
+        etaMinutes: Int
+    ) {
+        scope.launch {
+            stopNavigationRouteSimulation()
+            val totalEtaMinutes = ((etaHours.coerceIn(0, 23) * 60) + etaMinutes.coerceIn(0, 59)).coerceIn(0, 1439)
+            sendNavigationData(
+                turn = direction,
+                distanceMeters = distanceMeters.coerceIn(0, 65535),
+                unitByte = if (distanceMeters >= 1000) IqubeBleSpec.NAV_UNIT_KILOMETERS else IqubeBleSpec.NAV_UNIT_METERS,
+                streetName = direction.title,
+                etaMinutes = totalEtaMinutes
+            )
+        }
+    }
+
+    override fun onNavigationArrived() {
+        scope.launch {
+            stopNavigationRouteSimulation()
+            sendNavigationData(
+                turn = TurnTypeConstant.DESTINATION_REACHED,
+                distanceMeters = 0,
+                unitByte = IqubeBleSpec.NAV_UNIT_METERS,
+                streetName = TurnTypeConstant.DESTINATION_REACHED.title,
+                etaMinutes = 0
+            )
+        }
+    }
+
+    override fun onNavigationStopped() {
+        scope.launch {
+            clearNavigationOnCluster()
+        }
+    }
+
+    fun setGoogleMapsAutoForwardEnabled(enabled: Boolean) {
+        GoogleMapsNotificationListenerService.setAutoForwardEnabled(enabled)
+    }
+
+    /**
+     * Cycles through realistic ongoing Google Maps notifications (including metric/imperial distances,
+     * multi-hour ETAs with arrival clock times to ignore, roundabout exits, and arrival) to test the
+     * [GoogleMapsNotificationListenerService] parser and cluster forwarding pipeline.
+     */
+    fun simulateGoogleMapsSampleNotification() {
+        data class SampleGmapsNotification(
+            val title: String,
+            val text: String,
+            val subText: String
+        )
+        val samples = listOf(
+            SampleGmapsNotification(
+                title = "350 m",
+                text = "Turn left onto Wardha Rd",
+                subText = "14 min · 5.2 km · 10:45 PM"
+            ),
+            SampleGmapsNotification(
+                title = "1.4 km",
+                text = "Keep right at the intersection onto Ring Rd",
+                subText = "1 hr 18 min · 42 km · ETA 11:50 PM"
+            ),
+            SampleGmapsNotification(
+                title = "220 m",
+                text = "At the roundabout, take the 2nd exit",
+                subText = "9 min (3.1 km) · 10:40 PM"
+            ),
+            SampleGmapsNotification(
+                title = "80 m",
+                text = "Make a U-turn",
+                subText = "3 min · 900 m · 10:34 PM"
+            ),
+            SampleGmapsNotification(
+                title = "0 m",
+                text = "You have arrived at your destination",
+                subText = "Arrived · 10:31 PM"
+            )
+        )
+        val sample = samples[sampleGoogleMapsStepIndex % samples.size]
+        sampleGoogleMapsStepIndex++
+        GoogleMapsNotificationListenerService.processRawGoogleMapsNotification(
+            isOngoing = true,
+            title = sample.title,
+            text = sample.text,
+            subText = sample.subText
         )
     }
 

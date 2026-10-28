@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -83,7 +84,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.ble.GoogleMapsNotificationListenerService
 import com.example.model.ChargingMonitorState
+import com.example.model.GoogleMapsListenerState
 import com.example.model.IncomingCallRelayState
 import com.example.model.IqubeBleSpec
 import com.example.model.LastSeenScooterState
@@ -154,6 +157,9 @@ fun CockpitDashboardScreen(
     onSendPhoneStatusRelayClick: () -> Unit = {},
     onSetPhoneBatteryOverride: (Int) -> Unit = {},
     onSyncClockNowClick: () -> Unit = {},
+    googleMapsListenerState: GoogleMapsListenerState = GoogleMapsListenerState(),
+    onSetGoogleMapsAutoForward: (Boolean) -> Unit = {},
+    onSimulateGoogleMapsNotificationClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -228,12 +234,15 @@ fun CockpitDashboardScreen(
                 onResetActiveTripClick = onResetActiveTripClick
             )
 
-            // 5. TURN-BY-TURN NAVIGATION INJECTOR (`0x5B 0x4F` -> 400ms -> `0x5A/0x5B 0x4E`)
+            // 5. TURN-BY-TURN NAVIGATION INJECTOR (`0x5B 0x4F` -> 400ms -> `0x5A/0x5B 0x4E`) + GOOGLE MAPS LISTENER
             TurnByTurnNavigationInjectorCard(
                 navigationState = navigationState,
+                googleMapsListenerState = googleMapsListenerState,
                 onSendManeuver = onSendNavigationManeuver,
                 onToggleRouteSimulation = onToggleNavigationRouteSim,
-                onClearNavigation = onClearNavigationClick
+                onClearNavigation = onClearNavigationClick,
+                onSetGoogleMapsAutoForward = onSetGoogleMapsAutoForward,
+                onSimulateGoogleMapsNotificationClick = onSimulateGoogleMapsNotificationClick
             )
 
             // 6. LIVE CLUSTER LOCATION SYNC CARD (Top Location Line `0x5B 0x5C` vs Lower Cyan Banner `0x5B 0x43`/`0x5B 0x62`)
@@ -1532,10 +1541,17 @@ private fun ClusterLocationSyncCard(
 @Composable
 private fun TurnByTurnNavigationInjectorCard(
     navigationState: NavigationManeuverState,
+    googleMapsListenerState: GoogleMapsListenerState = GoogleMapsListenerState(),
     onSendManeuver: (TurnTypeConstant, Int, Byte, String, Int) -> Unit,
     onToggleRouteSimulation: () -> Unit,
-    onClearNavigation: () -> Unit = {}
+    onClearNavigation: () -> Unit = {},
+    onSetGoogleMapsAutoForward: (Boolean) -> Unit = {},
+    onSimulateGoogleMapsNotificationClick: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val isNotifAccessGranted = remember(googleMapsListenerState.isServiceConnected, googleMapsListenerState.dispatchedUpdateCount) {
+        GoogleMapsNotificationListenerService.isNotificationAccessGranted(context)
+    }
     var selectedTurn by remember(navigationState.selectedTurn) { mutableStateOf(navigationState.selectedTurn) }
     var distanceInput by remember(navigationState.distanceMeters) { mutableStateOf(navigationState.distanceMeters.toString()) }
     var distanceSliderVal by remember(navigationState.distanceMeters) {
@@ -1575,7 +1591,7 @@ private fun TurnByTurnNavigationInjectorCard(
             .background(SlateSurface)
             .border(
                 1.dp,
-                if (navigationState.isRouteSimulationRunning) NeonMint else SlateBorder,
+                if (navigationState.isRouteSimulationRunning || googleMapsListenerState.isActiveNavigationOngoing) NeonMint else SlateBorder,
                 RoundedCornerShape(18.dp)
             )
             .padding(16.dp)
@@ -1625,7 +1641,134 @@ private fun TurnByTurnNavigationInjectorCard(
             }
         }
 
-        // Full 22-Maneuver Dropdown Selector + Quick Maneuver Chips
+        // Live Google Maps NotificationListenerService Bridge Panel
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .border(
+                    1.dp,
+                    if (googleMapsListenerState.isActiveNavigationOngoing) NeonMint else ElectricCyan.copy(alpha = 0.45f),
+                    RoundedCornerShape(12.dp)
+                )
+                .padding(12.dp)
+                .testTag("google_maps_listener_panel"),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "GOOGLE MAPS AUTO-SYNC (com.google.android.apps.maps)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    Text(
+                        text = googleMapsListenerState.lastStatusMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (googleMapsListenerState.isActiveNavigationOngoing) NeonMint else TextSecondary
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Auto Relay",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Switch(
+                        checked = googleMapsListenerState.isAutoForwardEnabled,
+                        onCheckedChange = onSetGoogleMapsAutoForward,
+                        modifier = Modifier.testTag("gmaps_auto_forward_switch")
+                    )
+                }
+            }
+
+            val parsedNav = googleMapsListenerState.lastParsedNavigation
+            if (parsedNav != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1.2f)) {
+                        Text("1. DIRECTION", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Text(
+                            text = "${parsedNav.direction.symbol} ${parsedNav.direction.title} (${parsedNav.direction.hexLabel})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = NeonMint
+                        )
+                    }
+                    Column(modifier = Modifier.weight(0.8f)) {
+                        Text("2. DISTANCE", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Text(
+                            text = "${parsedNav.distanceMeters} m",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = ElectricCyan
+                        )
+                    }
+                    Column(modifier = Modifier.weight(0.8f)) {
+                        Text("3. ETA DURATION", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Text(
+                            text = "${parsedNav.etaHours}h ${parsedNav.etaMinutes}m",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = AmberWarning
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onSimulateGoogleMapsNotificationClick,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("simulate_gmaps_notification_button")
+                ) {
+                    Text(
+                        text = "Test Google Maps Notification",
+                        color = ElectricCyan,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                if (!isNotifAccessGranted) {
+                    Button(
+                        onClick = {
+                            runCatching {
+                                val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AmberWarning, contentColor = SlateSurface),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("grant_notification_access_button")
+                    ) {
+                        Text(
+                            text = "Grant Notification Access",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
+        // Full 66-Maneuver Dropdown Selector + Quick Maneuver Chips
         Box(modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(
                 onClick = { dropdownExpanded = true },
@@ -1636,10 +1779,11 @@ private fun TurnByTurnNavigationInjectorCard(
                 Text(
                     text = String.format(
                         Locale.US,
-                        "Maneuver Icon: %s %s (Byte[9] = 0x%02X) — Tap to Choose All 22 Turns",
+                        "Maneuver Icon: %s %s (Byte[9] = 0x%02X) — Tap to Choose All %d Turns",
                         selectedTurn.symbol,
                         selectedTurn.title,
-                        selectedTurn.code
+                        selectedTurn.code,
+                        TurnTypeConstant.entries.size
                     ),
                     color = ElectricCyan,
                     style = MaterialTheme.typography.labelMedium,

@@ -98,6 +98,7 @@ fun IqubeCompanionApp(
     val lastSeenState by viewModel.lastSeenState.collectAsStateWithLifecycle()
     val incomingCallState by viewModel.incomingCallState.collectAsStateWithLifecycle()
     val navigationState by viewModel.navigationState.collectAsStateWithLifecycle()
+    val googleMapsListenerState by viewModel.googleMapsListenerState.collectAsStateWithLifecycle()
     val riderGreetingName by viewModel.riderGreetingName.collectAsStateWithLifecycle()
     val musicTrackTitle by viewModel.musicTrackTitle.collectAsStateWithLifecycle()
     val mediaPlayerState by viewModel.mediaPlayerState.collectAsStateWithLifecycle()
@@ -237,7 +238,10 @@ fun IqubeCompanionApp(
                                     onSyncRiderGreetingClick = viewModel::syncRiderGreetingToCluster,
                                     onSendPhoneStatusRelayClick = viewModel::sendPhoneStatusRelayNow,
                                     onSetPhoneBatteryOverride = viewModel::setPhoneBatteryOverride,
-                                    onSyncClockNowClick = viewModel::syncClockToClusterNow
+                                    onSyncClockNowClick = viewModel::syncClockToClusterNow,
+                                    googleMapsListenerState = googleMapsListenerState,
+                                    onSetGoogleMapsAutoForward = viewModel::setGoogleMapsAutoForwardEnabled,
+                                    onSimulateGoogleMapsNotificationClick = viewModel::simulateGoogleMapsSampleNotification
                                 )
                             }
                             DashboardDestination.SAVED_TRIPS -> {

@@ -358,4 +358,81 @@ class ExampleUnitTest {
         assertTrue(learnedRange.isUsingLearnedEfficiency)
         assertEquals(81.0, learnedRange.trueEcoRangeKm ?: 0.0, 0.1)
     }
+
+    @Test
+    fun googleMapsNotificationListener_parsesDirectionsDistancesEtasAndFiltersNonNav() {
+        // 1. Standard metric turn + minutes ETA + arrival clock time ignored ("10:45 PM")
+        val leftTurn = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "350 m",
+            text = "Turn left onto Right Way",
+            subText = "14 min · 5.2 km · 10:45 PM"
+        )
+        assertNotNull(leftTurn)
+        assertEquals(TurnTypeConstant.TURN_LEFT, leftTurn?.direction)
+        assertEquals(350, leftTurn?.distanceMeters)
+        assertEquals(0, leftTurn?.etaHours)
+        assertEquals(14, leftTurn?.etaMinutes)
+        assertFalse(leftTurn?.isDestinationArrived ?: true)
+
+        // 2. Kilometer distance + multi-hour ETA + 24h clock time ignored ("ETA 14:20")
+        val keepRight = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "1.4 km",
+            text = "Keep right at the intersection onto Ring Rd",
+            subText = "1 hr 25 min · 42 km · ETA 14:20"
+        )
+        assertNotNull(keepRight)
+        assertEquals(TurnTypeConstant.KEEP_RIGHT_AT_INTERSECTION, keepRight?.direction)
+        assertEquals(1400, keepRight?.distanceMeters)
+        assertEquals(1, keepRight?.etaHours)
+        assertEquals(25, keepRight?.etaMinutes)
+
+        // 3. Roundabout 2nd exit + imperial feet normalization (500 ft = 152 m)
+        val roundabout2 = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "500 ft",
+            text = "At the roundabout, take the 2nd exit",
+            subText = "9 min (3.1 mi) · 9:15 AM"
+        )
+        assertNotNull(roundabout2)
+        assertEquals(TurnTypeConstant.ROUNDABOUT_EXIT_2, roundabout2?.direction)
+        assertEquals(152, roundabout2?.distanceMeters)
+        assertEquals(0, roundabout2?.etaHours)
+        assertEquals(9, roundabout2?.etaMinutes)
+
+        // 4. Destination Arrival lifecycle detection
+        val arrived = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "0 m",
+            text = "You have arrived at your destination",
+            subText = "Arrived · 10:31 PM"
+        )
+        assertNotNull(arrived)
+        assertEquals(TurnTypeConstant.DESTINATION_REACHED, arrived?.direction)
+        assertEquals(0, arrived?.distanceMeters)
+        assertEquals(0, arrived?.etaHours)
+        assertEquals(0, arrived?.etaMinutes)
+        assertTrue(arrived?.isDestinationArrived == true)
+
+        // 5. Reject rerouting, GPS search, and background non-navigation alerts
+        assertNull(
+            com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+                title = "Rerouting...",
+                text = "Finding best route",
+                subText = "12 min · 10:45 PM"
+            )
+        )
+        assertNull(
+            com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+                title = "Searching for GPS...",
+                text = "Turn left onto Wardha Rd",
+                subText = "12 min"
+            )
+        )
+        assertNull(
+            com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+                title = "Sharing your location",
+                text = "Active with 2 people",
+                subText = ""
+            )
+        )
+    }
 }
+

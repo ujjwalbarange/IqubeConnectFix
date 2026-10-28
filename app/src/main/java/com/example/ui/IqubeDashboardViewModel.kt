@@ -7,6 +7,7 @@ import com.example.model.ActiveTripSession
 import com.example.model.BleConnectionPhase
 import com.example.model.ByteOffsetMapping
 import com.example.model.ChargingMonitorState
+import com.example.model.GoogleMapsListenerState
 import com.example.model.GpsBleFusionSample
 import com.example.model.IncomingCallRelayState
 import com.example.model.IqubeBleSpec
@@ -65,6 +66,7 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
     val lastSeenState: StateFlow<LastSeenScooterState?> = bleManager.lastSeenState
     val incomingCallState: StateFlow<IncomingCallRelayState> = bleManager.incomingCallState
     val navigationState: StateFlow<NavigationManeuverState> = bleManager.navigationState
+    val googleMapsListenerState: StateFlow<GoogleMapsListenerState> = bleManager.googleMapsListenerState
     val riderGreetingName: StateFlow<String> = bleManager.riderGreetingName
     val musicTrackTitle: StateFlow<String> = bleManager.musicTrackTitle
     val mediaPlayerState: StateFlow<MediaPlayerState> = bleManager.mediaPlayerState
@@ -173,6 +175,14 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
 
     fun clearNavigationOnCluster() {
         bleManager.clearNavigationOnCluster()
+    }
+
+    fun setGoogleMapsAutoForwardEnabled(enabled: Boolean) {
+        bleManager.setGoogleMapsAutoForwardEnabled(enabled)
+    }
+
+    fun simulateGoogleMapsSampleNotification() {
+        bleManager.simulateGoogleMapsSampleNotification()
     }
 
     // Music Track Banner (`0x5B 0x62`), Handlebar Key (`0x5A 0x6B`), Rider Greeting (`0x5B 0x52`), & Phone Status (`0x5B 0x52 0x55`)

@@ -122,31 +122,89 @@ enum class MusicCommand(val code: Int, val label: String) {
 }
 
 /**
- * Exact Turn-by-Turn Navigation Maneuver Constants from Mappls `TurnTypeConstants.smali`.
+ * Complete Turn-by-Turn Navigation Maneuver & Pictogram Constants extracted from
+ * Mappls `TurnTypeConstants.smali` (classes7.dex), `BleNavigationDataSourceImp` (classes12.dex),
+ * and `BleNavigationSendData$Companion` (classes12.dex).
  */
 enum class TurnTypeConstant(val code: Int, val title: String, val symbol: String) {
+    // --- Original 22 Verified Core Maneuvers ---
     TURN_LEFT(0x00, "Turn Left", "↰"),
     TURN_SHARPLY_LEFT(0x01, "Turn Sharply Left", "↙"),
     TURN_SLIGHTLY_LEFT(0x02, "Turn Slightly Left", "↖"),
     TURN_RIGHT(0x03, "Turn Right", "↱"),
     TURN_SHARPLY_RIGHT(0x04, "Turn Sharply Right", "↘"),
     TURN_SLIGHTLY_RIGHT(0x05, "Turn Slightly Right", "↗"),
-    U_TURN(0x06, "U-Turn", "↶"),
+    U_TURN(0x06, "U-Turn (Left)", "↶"),
     CONTINUE_STRAIGHT(0x07, "Continue Straight", "↑"),
     DESTINATION_REACHED(0x08, "Destination Reached", "🏁"),
     KEEP_LEFT(0x09, "Keep Left", "⇖"),
     KEEP_RIGHT(0x0A, "Keep Right", "⇗"),
     TAKE_LEFT_AT(0x0B, "Take Left At", "↰"),
-    TAKE_RIGHT_AT(0x0C, "Take Right At", "↱"),
+    TAKE_RIGHT_AT(0x0C, "Take Right At / Off Route", "↱"),
     TAKE_LEFT_AT_END(0x0D, "Take Left At End", "↰"),
     TAKE_RIGHT_AT_END(0x0E, "Take Right At End", "↱"),
     FORK_LEFT(0x0F, "Fork Left", "⑂←"),
     FORK_RIGHT(0x10, "Fork Right", "⑂→"),
     CONTINUE_STRAIGHT_AT_INTERSECTION(0x15, "Straight At Intersection", "┼↑"),
     RIGHT_U_TURN(0x29, "Right U-Turn", "↷"),
-    ROUNDABOUT(0x44, "Roundabout", "⟳"),
-    ROUNDABOUT_LEFT(0x45, "Roundabout Left", "⟲"),
-    ROTARY(0x48, "Rotary", "❂");
+    ROUNDABOUT(0x44, "Roundabout (Exit 4)", "⟳"),
+    ROUNDABOUT_LEFT(0x45, "Roundabout Left (Exit 5)", "⟲"),
+    ROTARY(0x48, "Rotary / Traffic Circle", "❂"),
+
+    // --- Additional 7 Mappls TurnTypeConstants (classes7.dex) ---
+    KEEP_LEFT_AT_INTERSECTION(0x13, "Keep Left At Intersection", "┼⇖"),
+    KEEP_RIGHT_AT_INTERSECTION(0x14, "Keep Right At Intersection", "┼⇗"),
+    HIGHWAY_EXIT_LEFT(0x22, "Highway Exit Left", "🛣←"),
+    HIGHWAY_ENTER_LEFT(0x23, "Highway Enter Left", "←🛣"),
+    TAKE_FERRY(0x24, "Take Ferry / Highway Right", "⛴"),
+    LEAVE_FERRY(0x25, "Leave Ferry", "⛴→"),
+    BORDER_CROSSING(0x28, "Border Crossing", "🛂"),
+
+    // --- Additional Roundabout Exits & MMIv2 Pictograms (0x30, 0x41..0x4B in classes12.dex) ---
+    ROUNDABOUT_PASS(0x30, "Roundabout Pass", "⟳↑"),
+    ROUNDABOUT_EXIT_1(0x41, "Roundabout Exit 1", "⟳①"),
+    ROUNDABOUT_EXIT_2(0x42, "Roundabout Exit 2", "⟳②"),
+    ROUNDABOUT_EXIT_3(0x43, "Roundabout Exit 3 / Enter", "⟳③"),
+    ROUNDABOUT_EXIT_6_RIGHT_2(0x46, "Roundabout Exit 6 / Right 2", "⟳⑥"),
+    ROUNDABOUT_EXIT_7_RIGHT_1(0x47, "Roundabout Exit 7 / Right 1", "⟳⑦"),
+    ROUNDABOUT_STRAIGHT_MMI(0x49, "Roundabout Straight (MMIv2)", "⟳↑"),
+    ROUNDABOUT_LEFT_MMI(0x4A, "Roundabout Left (MMIv2)", "⟲←"),
+    ROUNDABOUT_RIGHT_MMI(0x4B, "Roundabout Right (MMIv2)", "⟳→"),
+
+    // --- Extended V1 / HERE / U546 / U725 Cluster Pictograms (classes12.dex & classes15.dex) ---
+    RIGHT_FORK_V1(0x11, "Right Fork (V1)", "⑂→"),
+    RIGHT_EXIT_RAMP_V1(0x12, "Right Exit / Ramp (V1)", "↱🛣"),
+    ARRIVE_V1(0x16, "Arrive / Destination (V1)", "🏁"),
+    FERRY_V1(0x17, "Ferry (V1)", "⛴"),
+    LEFT_ROUNDABOUT_EXIT_1_V1(0x1B, "Left Roundabout Exit 1 (V1)", "⟲①"),
+    LEFT_ROUNDABOUT_EXIT_2_V1(0x1C, "Left Roundabout Exit 2 (V1)", "⟲②"),
+    LEFT_ROUNDABOUT_EXIT_3_V1(0x1D, "Left Roundabout Exit 3 (V1)", "⟲③"),
+    RIGHT_ROUNDABOUT_ENTER_V1(0x1E, "Right Roundabout Enter (V1)", "⟳"),
+    LEFT_ROUNDABOUT_EXIT_5_V1(0x1F, "Left Roundabout Exit 5 (V1)", "⟲⑤"),
+    LEFT_ROUNDABOUT_EXIT_6_V1(0x20, "Left Roundabout Exit 6 (V1)", "⟲⑥"),
+    LEFT_ROUNDABOUT_EXIT_7_V1(0x21, "Left Roundabout Exit 7 (V1)", "⟲⑦"),
+    RIGHT_ROUNDABOUT_EXIT_5_V1(0x26, "Right Roundabout Exit 5 (V1)", "⟳⑤"),
+    RIGHT_ROUNDABOUT_EXIT_6_V1(0x27, "Right Roundabout Exit 6 (V1)", "⟳⑥"),
+    LEFT_ROUNDABOUT_EXIT_8_V1(0x2A, "Left Roundabout Exit 8 (V1)", "⟲⑧"),
+    LEFT_ROUNDABOUT_EXIT_9_V1(0x2B, "Left Roundabout Exit 9 (V1)", "⟲⑨"),
+    LEFT_ROUNDABOUT_EXIT_10_V1(0x2C, "Left Roundabout Exit 10 (V1)", "⟲⑩"),
+    LEFT_ROUNDABOUT_EXIT_11_V1(0x2D, "Left Roundabout Exit 11 (V1)", "⟲⑪"),
+    LEFT_ROUNDABOUT_EXIT_12_V1(0x2E, "Left Roundabout Exit 12 (V1)", "⟲⑫"),
+    LEFT_ROUNDABOUT_ENTER_V1(0x2F, "Left Roundabout Enter (V1)", "⟲"),
+    MIDDLE_FORK(0x31, "Middle Fork", "⑂↑"),
+    RIGHT_ROUNDABOUT_EXIT_8_V1(0x32, "Right Roundabout Exit 8 (V1)", "⟳⑧"),
+    RIGHT_ROUNDABOUT_EXIT_9_V1(0x33, "Right Roundabout Exit 9 (V1)", "⟳⑨"),
+    RIGHT_ROUNDABOUT_EXIT_10_V1(0x34, "Right Roundabout Exit 10 (V1)", "⟳⑩"),
+    RIGHT_ROUNDABOUT_EXIT_11_V1(0x35, "Right Roundabout Exit 11 (V1)", "⟳⑪"),
+    RIGHT_ROUNDABOUT_EXIT_12_V1(0x36, "Right Roundabout Exit 12 (V1)", "⟳⑫"),
+    RIGHT_ROUNDABOUT_ENTER_ALT(0x37, "Right Roundabout Enter Alt", "⟳"),
+    RIGHT_ROUNDABOUT_PASS_V1(0x38, "Right Roundabout Pass (V1)", "⟳↑"),
+    CONTINUE_ON_V1(0x39, "Continue Straight (V1)", "↑"),
+    ROUNDABOUT_U_TURN_CW(0x3C, "Roundabout U-Turn CW", "⟳↶"),
+    ROUNDABOUT_U_TURN_CCW(0x3D, "Roundabout U-Turn CCW", "⟲↷"),
+    ROUNDABOUT_EXIT_CW(0x3E, "Roundabout Exit CW", "⟳↗"),
+    ROUNDABOUT_EXIT_CCW(0x3F, "Roundabout Exit CCW", "⟲↖"),
+    ROTARY_U725(0x40, "Rotary (U725)", "❂");
 
     val hexLabel: String
         get() = String.format(Locale.US, "0x%02X", code)
@@ -167,6 +225,39 @@ data class NavigationManeuverState(
     val lastPacket1Hex: String? = null,
     val lastPacket2Hex: String? = null,
     val lastSentTimestampMs: Long? = null
+)
+
+/**
+ * Normalized telemetry extracted from an ongoing Google Maps (`com.google.android.apps.maps`)
+ * Turn-by-Turn navigation notification.
+ */
+data class ParsedGoogleMapsNavigation(
+    val direction: TurnTypeConstant,
+    val distanceMeters: Int,
+    val etaHours: Int,
+    val etaMinutes: Int,
+    val isDestinationArrived: Boolean = direction == TurnTypeConstant.DESTINATION_REACHED,
+    val rawTitle: String = "",
+    val rawText: String = "",
+    val rawSubText: String = ""
+) {
+    val totalEtaMinutes: Int
+        get() = (etaHours.coerceAtLeast(0) * 60) + etaMinutes.coerceIn(0, 59)
+}
+
+/**
+ * Live state of the crash-proof `GoogleMapsNotificationListenerService`.
+ */
+data class GoogleMapsListenerState(
+    val isServiceConnected: Boolean = false,
+    val isAutoForwardEnabled: Boolean = true,
+    val isActiveNavigationOngoing: Boolean = false,
+    val lastParsedNavigation: ParsedGoogleMapsNavigation? = null,
+    val dispatchedUpdateCount: Int = 0,
+    val ignoredDuplicateCount: Int = 0,
+    val filteredNonNavCount: Int = 0,
+    val lastStatusMessage: String = "Waiting for Google Maps ongoing navigation...",
+    val lastUpdatedAtMs: Long? = null
 )
 
 /**
