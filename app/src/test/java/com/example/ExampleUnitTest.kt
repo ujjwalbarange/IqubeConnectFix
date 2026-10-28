@@ -517,6 +517,39 @@ class ExampleUnitTest {
         assertEquals(0x44, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.ROUNDABOUT_EXIT_1.code))
         assertEquals(0x44, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.ROUNDABOUT_EXIT_2.code))
         assertEquals(0x48, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.ROTARY.code))
+
+        // 9. Field Test: Exact Google Maps Notification from Screenshot (80 m, towards Police Nagar, CRPF Rd, Then ↱)
+        val policeNagarParsed = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "80 m",
+            text = "towards Police Nagar",
+            subText = "CRPF Rd",
+            extraStrings = listOf("Then ↱")
+        )
+        assertNotNull(policeNagarParsed)
+        assertEquals("Direction must detect as TURN_RIGHT (never U-turn!)", TurnTypeConstant.TURN_RIGHT, policeNagarParsed?.direction)
+        assertEquals(80, policeNagarParsed?.distanceMeters)
+        assertEquals("Street must be extracted as CRPF Rd", "CRPF Rd", policeNagarParsed?.streetOrLocationName)
+
+        // 10. Field Test: Central Bazar Road Street Extraction & Abbreviation to max 17 ASCII bytes
+        val centralBazarStreet = com.example.ble.GoogleMapsNotificationListenerService.extractTargetStreetOrLocation(
+            title = "450 m",
+            text = "Kachipura Chowk",
+            subText = "onto Central Bazar Road"
+        )
+        assertEquals("Central Bazar Rd", centralBazarStreet)
+        assertTrue("Street length must fit in 17 ASCII bytes for 0x5B 0x5C cluster banner", centralBazarStreet.length <= 17)
+
+        // 11. Unicode Directional Arrows & Sub-Cues
+        assertEquals(TurnTypeConstant.TURN_RIGHT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Then ↱"))
+        assertEquals(TurnTypeConstant.TURN_RIGHT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("↱"))
+        assertEquals(TurnTypeConstant.TURN_RIGHT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("→"))
+        assertEquals(TurnTypeConstant.TURN_LEFT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Then ↰"))
+        assertEquals(TurnTypeConstant.TURN_LEFT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("↰"))
+        assertEquals(TurnTypeConstant.TURN_LEFT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("←"))
+        assertEquals(TurnTypeConstant.TURN_SLIGHTLY_RIGHT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("↗"))
+        assertEquals(TurnTypeConstant.TURN_SLIGHTLY_LEFT, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("↖"))
+        assertEquals(TurnTypeConstant.RIGHT_U_TURN, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("↷"))
+        assertEquals(TurnTypeConstant.U_TURN, com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("↶"))
     }
 }
 

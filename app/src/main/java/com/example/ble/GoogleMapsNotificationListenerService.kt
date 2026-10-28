@@ -35,7 +35,8 @@ interface VehicleNavigationHandler {
         direction: TurnTypeConstant,
         distanceMeters: Int,
         etaHours: Int,
-        etaMinutes: Int
+        etaMinutes: Int,
+        streetOrLocationName: String = ""
     )
 
     fun onNavigationArrived()
@@ -151,7 +152,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val distanceMeters: Int,
             val etaHours: Int,
             val etaMinutes: Int,
-            val isDestinationArrived: Boolean
+            val isDestinationArrived: Boolean,
+            val streetOrLocationName: String = ""
         )
 
         internal data class NotificationExtrasSnapshot(
@@ -289,6 +291,18 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 }
             }
 
+            // Extract all text lines from Google Maps custom RemoteViews (contentView, bigContentView, headsUpContentView)
+            if (notification != null) {
+                val remoteStrings = buildList {
+                    addAll(extractStringsFromRemoteViews(notification.contentView))
+                    addAll(extractStringsFromRemoteViews(notification.bigContentView))
+                    addAll(extractStringsFromRemoteViews(notification.headsUpContentView))
+                }
+                for (s in remoteStrings) {
+                    if (!allExtraStrings.contains(s)) allExtraStrings.add(s)
+                }
+            }
+
             var iconResName: String? = null
             var iconShapeDir: TurnTypeConstant? = null
 
@@ -318,6 +332,31 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             )
         }
 
+        internal fun extractStringsFromRemoteViews(rv: android.widget.RemoteViews?): List<String> {
+            if (rv == null) return emptyList()
+            val strings = mutableListOf<String>()
+            runCatching {
+                val actionsField = rv.javaClass.getDeclaredField("mActions")
+                actionsField.isAccessible = true
+                val actions = actionsField.get(rv) as? List<*> ?: return emptyList()
+                for (action in actions) {
+                    if (action == null) continue
+                    for (field in action.javaClass.declaredFields) {
+                        runCatching {
+                            field.isAccessible = true
+                            when (val v = field.get(action)) {
+                                is CharSequence -> {
+                                    val s = v.toString().replace('\u00A0', ' ').trim()
+                                    if (s.isNotBlank() && !strings.contains(s)) strings.add(s)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return strings
+        }
+
         internal fun resolveIconResourceName(context: Context, icon: Icon?): String? {
             if (icon == null) return null
             return runCatching {
@@ -336,7 +375,10 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 }
 
                 if (resId != 0) {
-                    val pm = context.packageManager
+                    val remoteContext = runCatching {
+                        context.createPackageContext(pkg, Context.CONTEXT_IGNORE_SECURITY)
+                    }.getOrNull() ?: context
+                    val pm = remoteContext.packageManager
                     val res = pm.getResourcesForApplication(pkg)
                     res.getResourceEntryName(resId)
                 } else null
@@ -346,19 +388,29 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
         internal fun classifyArrowFromIcon(context: Context, icon: Icon?): TurnTypeConstant? {
             if (icon == null) return null
             return runCatching {
-                val drawable = icon.loadDrawable(context) ?: return null
-                val width = 24
-                val height = 24
+                val remoteContext = runCatching {
+                    context.createPackageContext(GOOGLE_MAPS_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
+                }.getOrNull() ?: context
+
+                val drawable = icon.loadDrawable(remoteContext)
+                    ?: icon.loadDrawable(context)
+                    ?: return null
+
+                val width = 48
+                val height = 48
                 val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(bitmap)
                 drawable.setBounds(0, 0, width, height)
                 drawable.draw(canvas)
 
-                var leftWeight = 0
-                var rightWeight = 0
-                var topWeight = 0
-                var bottomWeight = 0
+                var leftTop = 0
+                var rightTop = 0
+                var leftBottom = 0
+                var rightBottom = 0
                 var nonTransparentPixels = 0
+
+                val midX = width / 2
+                val midY = height / 2
 
                 for (y in 0 until height) {
                     for (x in 0 until width) {
@@ -366,24 +418,27 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                         val alpha = (pixel ushr 24) and 0xFF
                         if (alpha > 40) {
                             nonTransparentPixels++
-                            if (x < (width / 2 - 1)) leftWeight++
-                            else if (x > (width / 2 + 1)) rightWeight++
-
-                            if (y < height / 2) topWeight++
-                            else bottomWeight++
+                            if (y < midY) {
+                                if (x < midX) leftTop++ else rightTop++
+                            } else {
+                                if (x < midX) leftBottom++ else rightBottom++
+                            }
                         }
                     }
                 }
 
                 if (nonTransparentPixels < 10) return null
 
-                val rightBias = if (leftWeight > 0) rightWeight.toFloat() / leftWeight else rightWeight.toFloat()
-                val leftBias = if (rightWeight > 0) leftWeight.toFloat() / rightWeight else leftWeight.toFloat()
+                val totalLeft = leftTop + leftBottom
+                val totalRight = rightTop + rightBottom
+
+                // Right-turn arrow (↱): the upper branch and arrowhead point to the right
+                val isRight = (rightTop > leftTop * 1.15f) || (totalRight > totalLeft * 1.15f)
+                val isLeft = (leftTop > rightTop * 1.15f) || (totalLeft > totalRight * 1.15f)
 
                 when {
-                    rightBias >= 1.5f -> TurnTypeConstant.TURN_RIGHT
-                    leftBias >= 1.5f -> TurnTypeConstant.TURN_LEFT
-                    bottomWeight > topWeight * 1.6f -> TurnTypeConstant.U_TURN
+                    isRight && !isLeft -> TurnTypeConstant.TURN_RIGHT
+                    isLeft && !isRight -> TurnTypeConstant.TURN_LEFT
                     else -> TurnTypeConstant.CONTINUE_STRAIGHT
                 }
             }.getOrNull()
@@ -539,13 +594,14 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
 
             // Requirement 5: Deduplicate incoming notifications so updates are only dispatched
-            // when direction, distance, or ETA changes.
+            // when direction, distance, ETA, or target street/location changes.
             val newKey = DeduplicationKey(
                 direction = parsed.direction,
                 distanceMeters = parsed.distanceMeters,
                 etaHours = parsed.etaHours,
                 etaMinutes = parsed.etaMinutes,
-                isDestinationArrived = parsed.isDestinationArrived
+                isDestinationArrived = parsed.isDestinationArrived,
+                streetOrLocationName = parsed.streetOrLocationName
             )
 
             if (previousKey == newKey) {
@@ -567,7 +623,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     lastStatusMessage = if (parsed.isDestinationArrived) {
                         "Destination Reached (0x08) • Arrived"
                     } else {
-                        "Dispatched ${parsed.direction.title} (${parsed.direction.hexLabel}) • ${parsed.distanceMeters}m • ETA ${parsed.etaHours}h ${parsed.etaMinutes}m"
+                        "Dispatched ${parsed.direction.title} (${parsed.direction.hexLabel}) • ${parsed.distanceMeters}m • ETA ${parsed.etaHours}h ${parsed.etaMinutes}m" +
+                            if (parsed.streetOrLocationName.isNotBlank()) " • Street: ${parsed.streetOrLocationName}" else ""
                     },
                     lastUpdatedAtMs = System.currentTimeMillis()
                 )
@@ -584,7 +641,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     direction = parsed.direction,
                     distanceMeters = parsed.distanceMeters,
                     etaHours = parsed.etaHours,
-                    etaMinutes = parsed.etaMinutes
+                    etaMinutes = parsed.etaMinutes,
+                    streetOrLocationName = parsed.streetOrLocationName
                 )
             }
         }
@@ -695,6 +753,15 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val resolvedDistanceMeters = (extractedDistance ?: 0).coerceIn(0, 65535)
             val (etaHours, etaMinutes) = etaPair ?: (0 to 0)
 
+            val extractedStreet = extractTargetStreetOrLocation(
+                title = cleanTitle,
+                text = cleanText.ifBlank { cleanTicker },
+                subText = cleanSubText,
+                bigText = "",
+                tickerText = cleanTicker,
+                extraStrings = extraStrings
+            )
+
             return ParsedGoogleMapsNavigation(
                 direction = resolvedDirection,
                 distanceMeters = resolvedDistanceMeters,
@@ -703,7 +770,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 isDestinationArrived = resolvedDirection == TurnTypeConstant.DESTINATION_REACHED,
                 rawTitle = cleanTitle,
                 rawText = cleanText,
-                rawSubText = cleanSubText
+                rawSubText = cleanSubText,
+                streetOrLocationName = extractedStreet
             )
         }
 
@@ -772,6 +840,35 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             if (input.isBlank()) return null
             val lower = input.lowercase(Locale.US)
 
+            // 0. Explicit Unicode Directional Arrows & Sub-Cues (e.g. Google Maps sub-cue "Then ↱", "↱", "↰")
+            if (lower.contains("then ↱") || lower.contains("then right") || lower.contains("then turn right") || lower.contains("↱") || lower.contains("->") || lower.contains("→")) {
+                return TurnTypeConstant.TURN_RIGHT
+            }
+            if (lower.contains("then ↰") || lower.contains("then left") || lower.contains("then turn left") || lower.contains("↰") || lower.contains("<-") || lower.contains("←")) {
+                return TurnTypeConstant.TURN_LEFT
+            }
+            if (lower.contains("↗") || lower.contains("bear right")) {
+                return TurnTypeConstant.TURN_SLIGHTLY_RIGHT
+            }
+            if (lower.contains("↖") || lower.contains("bear left")) {
+                return TurnTypeConstant.TURN_SLIGHTLY_LEFT
+            }
+            if (lower.contains("↘")) {
+                return TurnTypeConstant.TURN_SHARPLY_RIGHT
+            }
+            if (lower.contains("↙")) {
+                return TurnTypeConstant.TURN_SHARPLY_LEFT
+            }
+            if (lower.contains("↷")) {
+                return TurnTypeConstant.RIGHT_U_TURN
+            }
+            if (lower.contains("↶")) {
+                return TurnTypeConstant.U_TURN
+            }
+            if (lower.contains("↑")) {
+                return TurnTypeConstant.CONTINUE_STRAIGHT
+            }
+
             // 1. Destination / Arrival
             if (
                 lower.contains("destination reached") ||
@@ -811,11 +908,11 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 return TurnTypeConstant.ROUNDABOUT
             }
 
-            // 3. U-Turns (Right vs Left/Standard)
+            // 3. U-Turns (Right vs Left/Standard) with strict word boundaries to prevent accidental matches
             if (lower.contains("right u-turn") || lower.contains("u-turn right") || lower.contains("right u turn")) {
                 return TurnTypeConstant.RIGHT_U_TURN
             }
-            if (lower.contains("u-turn") || lower.contains("u turn") || lower.contains("uturn")) {
+            if (Regex("""\b(?:u-turn|u\s+turn|uturn)\b""").containsMatchIn(lower)) {
                 return TurnTypeConstant.U_TURN
             }
 
@@ -889,7 +986,6 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
 
             // 8. Take Left / Take Right at end or intersection
-            // Maps to standard TURN_LEFT / TURN_RIGHT so cluster firmware displays native arrows
             if (lower.contains("left at the end") || lower.contains("take left at end") || lower.contains("take left") || lower.contains("take the left")) {
                 return TurnTypeConstant.TURN_LEFT
             }
@@ -898,7 +994,6 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
 
             // 9. Standard Turn Left / Turn Right
-            // Check multi-word directional cues first:
             val hasExplicitTurnRight = lower.contains("turn right") ||
                 lower.contains("right onto") ||
                 lower.contains("right toward") ||
@@ -940,6 +1035,107 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
 
             return null
+        }
+
+        /**
+         * Extracts the target street name or destination locality from Google Maps navigation text
+         * (e.g. "towards Police Nagar", "CRPF Rd", "onto Central Bazar Road", "Kachipura Chowk", "Wardha Rd").
+         *
+         * Abbreviates road descriptors (Road -> Rd, Street -> St, Avenue -> Ave) to ensure the result
+         * cleanly fits within the TVS iQube cluster's 17-character ASCII location banner (0x5B 0x5C).
+         */
+        fun extractTargetStreetOrLocation(
+            title: String,
+            text: String,
+            subText: String,
+            bigText: String = "",
+            tickerText: String = "",
+            extraStrings: List<String> = emptyList()
+        ): String {
+            val candidates = mutableListOf<String>()
+            fun addClean(s: String) {
+                s.split('\n', '·', '|').forEach { part ->
+                    val clean = part.replace('\u00A0', ' ').trim()
+                    if (clean.isNotBlank() && !candidates.contains(clean)) {
+                        candidates.add(clean)
+                    }
+                }
+            }
+
+            addClean(subText)
+            addClean(text)
+            addClean(bigText)
+            addClean(tickerText)
+            addClean(title)
+            extraStrings.forEach { addClean(it) }
+
+            // Filter out distances, ETAs, clock times, system notices, and pure maneuver words
+            val filtered = candidates.filter { s ->
+                val lower = s.lowercase(Locale.US)
+                !DISTANCE_TOKEN_REGEX.matches(s) &&
+                    !CLOCK_TIME_REGEX.matches(s) &&
+                    !lower.contains("min") &&
+                    !lower.contains("hr") &&
+                    !lower.contains("cyclonic") &&
+                    !lower.contains("traffic") &&
+                    !lower.contains("fastest") &&
+                    !lower.contains("dismiss") &&
+                    !lower.contains("rerouting") &&
+                    !lower.contains("searching for") &&
+                    !lower.startsWith("then ↱") &&
+                    !lower.startsWith("then ↰") &&
+                    s.length >= 2
+            }
+
+            var bestStreetName: String? = null
+            var bestLocalityName: String? = null
+
+            val roadKeywordRegex = Regex("""(?i)\b(?:road|rd|marg|street|st|chowk|square|sq|nagar|flyover|bypass|lane|ln|ave|avenue|blvd|highway|hwy|expwy|circle|path|way)\b""")
+            val prepositionRegex = Regex("""(?i)\b(?:towards|toward|onto|on|into|along|to)\s+([A-Za-z0-9\s.'/-]+)""")
+
+            for (cand in filtered) {
+                val prepMatch = prepositionRegex.find(cand)
+                val target = prepMatch?.groupValues?.get(1)?.trim() ?: cand.trim()
+
+                val cleanedTarget = target
+                    .replace(Regex("""(?i)^in\s+\d+.*?(?:turn\s+(?:left|right|sharp\s+right|slight\s+right|slight\s+left|sharp\s+left)|continue|head)\s+(?:onto|towards|toward|on|into)\s+"""), "")
+                    .replace(Regex("""(?i)^(?:turn\s+(?:left|right|sharp\s+right|slight\s+right|slight\s+left|sharp\s+left)|make\s+a\s+(?:left|right)|take\s+(?:left|right)|continue|head)\s+(?:onto|towards|toward|on|into)\s+"""), "")
+                    .replace(DISTANCE_TOKEN_REGEX, "")
+                    .trim()
+
+                if (cleanedTarget.isBlank()) continue
+
+                val lowerTarget = cleanedTarget.lowercase(Locale.US)
+                if (lowerTarget == "turn right" || lowerTarget == "turn left" || lowerTarget == "continue" || lowerTarget == "destination") {
+                    continue
+                }
+
+                if (roadKeywordRegex.containsMatchIn(cleanedTarget)) {
+                    if (bestStreetName == null || (!bestStreetName.contains(Regex("""(?i)\b(?:rd|road)\b""")) && cleanedTarget.contains(Regex("""(?i)\b(?:rd|road)\b""")))) {
+                        bestStreetName = cleanedTarget
+                    }
+                } else if (bestLocalityName == null && cleanedTarget.length in 3..25) {
+                    bestLocalityName = cleanedTarget
+                }
+            }
+
+            val rawSelection = bestStreetName ?: bestLocalityName ?: ""
+            if (rawSelection.isBlank()) return ""
+
+            val abbreviated = rawSelection
+                .replace(Regex("""(?i)\broad\b"""), "Rd")
+                .replace(Regex("""(?i)\bstreet\b"""), "St")
+                .replace(Regex("""(?i)\bavenue\b"""), "Ave")
+                .replace(Regex("""(?i)\bboulevard\b"""), "Blvd")
+                .replace(Regex("""(?i)\blane\b"""), "Ln")
+                .replace(Regex("""(?i)\bhighway\b"""), "Hwy")
+                .replace(Regex("""(?i)\bexpressway\b"""), "Expwy")
+                .replace(Regex("""(?i)\bsquare\b"""), "Sq")
+                .replace(Regex("""(?i)^(?:towards|toward|onto|on|into)\s+"""), "")
+                .replace(Regex("""[^A-Za-z0-9\s.'/-]"""), "")
+                .trim()
+
+            return abbreviated.take(17)
         }
 
         /**

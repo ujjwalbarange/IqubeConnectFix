@@ -239,7 +239,8 @@ data class ParsedGoogleMapsNavigation(
     val isDestinationArrived: Boolean = direction == TurnTypeConstant.DESTINATION_REACHED,
     val rawTitle: String = "",
     val rawText: String = "",
-    val rawSubText: String = ""
+    val rawSubText: String = "",
+    val streetOrLocationName: String = ""
 ) {
     val totalEtaMinutes: Int
         get() = (etaHours.coerceAtLeast(0) * 60) + etaMinutes.coerceIn(0, 59)

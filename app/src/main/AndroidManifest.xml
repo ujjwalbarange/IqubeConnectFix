@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Package visibility queries for Android 11+ (API 30+) to inspect Google Maps navigation icons and drawables -->
+    <queries>
+        <package android:name="com.google.android.apps.maps" />
+    </queries>
+
     <!-- Legacy Bluetooth permissions (Android 11 / API 30 and lower) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH"

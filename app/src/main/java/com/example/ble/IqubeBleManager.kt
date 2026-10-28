@@ -741,8 +741,9 @@ class IqubeBleManager(
         val safeEta = etaMinutes.coerceIn(0, 1439)
         val remDistMeters = if (turn == TurnTypeConstant.DESTINATION_REACHED) 0 else max(clampedDist, clampedDist + 200)
         val unitDisplayByte = if (clampedDist >= 1000) IqubeBleSpec.NAV_UNIT_KILOMETERS.toInt() else (unitByte.toInt() and 0xFF)
+        val effectiveStreet = streetName.ifBlank { turn.title }.take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
 
-        val pktInstruction0x4F = commandDispatcher.buildNavigationInstructionPacket0x4F(turn.title)
+        val pktInstruction0x4F = commandDispatcher.buildNavigationInstructionPacket0x4F(effectiveStreet)
         val pktControl0x5A4E = commandDispatcher.buildNavigationControlPacket0x4E(
             turnCode = turn.code,
             distanceMeters = clampedDist,
@@ -766,7 +767,7 @@ class IqubeBleManager(
                 distanceMeters = clampedDist,
                 unitByte = unitDisplayByte,
                 etaMinutes = safeEta,
-                streetName = turn.title,
+                streetName = effectiveStreet,
                 lastPacket1Hex = pktInstruction0x4F.toHexString(),
                 lastPacket2Hex = pktControl0x5A4E.toHexString(),
                 lastSentTimestampMs = System.currentTimeMillis()
@@ -776,7 +777,7 @@ class IqubeBleManager(
         navSequenceJob?.cancel()
         navSequenceJob = scope.launch {
             commandDispatcher.enqueueCommand(
-                label = String.format("Nav Pkt1 [O %s (5B 4F … FF)", turn.title),
+                label = String.format("Nav Pkt1 [O %s (5B 4F … FF)", effectiveStreet),
                 rawPayload = pktInstruction0x4F
             )
             delay(IqubeBleSpec.NAVIGATION_INTER_PACKET_DELAY_MS) // 400 ms (0x190 ms)
@@ -868,18 +869,24 @@ class IqubeBleManager(
         direction: TurnTypeConstant,
         distanceMeters: Int,
         etaHours: Int,
-        etaMinutes: Int
+        etaMinutes: Int,
+        streetOrLocationName: String
     ) {
         scope.launch {
             stopNavigationRouteSimulation()
             val totalEtaMinutes = ((etaHours.coerceIn(0, 23) * 60) + etaMinutes.coerceIn(0, 59)).coerceIn(0, 1439)
+            val cleanStreet = streetOrLocationName.trim().take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
             sendNavigationData(
                 turn = direction,
                 distanceMeters = distanceMeters.coerceIn(0, 65535),
                 unitByte = if (distanceMeters >= 1000) IqubeBleSpec.NAV_UNIT_KILOMETERS else IqubeBleSpec.NAV_UNIT_METERS,
-                streetName = direction.title,
+                streetName = cleanStreet.ifBlank { direction.title },
                 etaMinutes = totalEtaMinutes
             )
+            if (cleanStreet.isNotBlank()) {
+                _detectedLocalityName.value = cleanStreet
+                dumpLocationToClusterNow(cleanStreet)
+            }
         }
     }
 
@@ -899,6 +906,7 @@ class IqubeBleManager(
     override fun onNavigationStopped() {
         scope.launch {
             clearNavigationOnCluster()
+            dumpLocationToClusterNow()
         }
     }
 
