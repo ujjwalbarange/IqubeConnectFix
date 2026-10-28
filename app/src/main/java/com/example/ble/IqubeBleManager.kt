@@ -915,33 +915,55 @@ class IqubeBleManager(
         data class SampleGmapsNotification(
             val title: String,
             val text: String,
-            val subText: String
+            val subText: String,
+            val tickerText: String = "",
+            val iconResourceName: String? = null
         )
         val samples = listOf(
             SampleGmapsNotification(
+                title = "450 m",
+                text = "Kachipura Chowk",
+                subText = "onto Central Bazar Road",
+                tickerText = "In 450 m, turn right at Kachipura Chowk onto Central Bazar Road",
+                iconResourceName = "quantum_ic_turn_right_white_24"
+            ),
+            SampleGmapsNotification(
+                title = "20 m",
+                text = "Kachipura Chowk",
+                subText = "onto Central Bazar Road",
+                tickerText = "In 20 m, turn right onto Central Bazar Road",
+                iconResourceName = "quantum_ic_turn_right_white_24"
+            ),
+            SampleGmapsNotification(
                 title = "350 m",
                 text = "Turn left onto Wardha Rd",
-                subText = "14 min · 5.2 km · 10:45 PM"
+                subText = "14 min · 5.2 km · 10:45 PM",
+                tickerText = "Turn left onto Wardha Rd",
+                iconResourceName = "quantum_ic_turn_left_white_24"
             ),
             SampleGmapsNotification(
                 title = "1.4 km",
                 text = "Keep right at the intersection onto Ring Rd",
-                subText = "1 hr 18 min · 42 km · ETA 11:50 PM"
+                subText = "1 hr 18 min · 42 km · ETA 11:50 PM",
+                iconResourceName = "quantum_ic_keep_right_white_24"
             ),
             SampleGmapsNotification(
                 title = "220 m",
                 text = "At the roundabout, take the 2nd exit",
-                subText = "9 min (3.1 km) · 10:40 PM"
+                subText = "9 min (3.1 km) · 10:40 PM",
+                iconResourceName = "quantum_ic_roundabout_exit_2_white_24"
             ),
             SampleGmapsNotification(
                 title = "80 m",
                 text = "Make a U-turn",
-                subText = "3 min · 900 m · 10:34 PM"
+                subText = "3 min · 900 m · 10:34 PM",
+                iconResourceName = "quantum_ic_u_turn_white_24"
             ),
             SampleGmapsNotification(
                 title = "0 m",
                 text = "You have arrived at your destination",
-                subText = "Arrived · 10:31 PM"
+                subText = "Arrived · 10:31 PM",
+                iconResourceName = "quantum_ic_destination_white_24"
             )
         )
         val sample = samples[sampleGoogleMapsStepIndex % samples.size]
@@ -950,7 +972,9 @@ class IqubeBleManager(
             isOngoing = true,
             title = sample.title,
             text = sample.text,
-            subText = sample.subText
+            subText = sample.subText,
+            tickerText = sample.tickerText,
+            iconResourceName = sample.iconResourceName
         )
     }
 
@@ -1039,6 +1063,7 @@ class IqubeBleManager(
         stopReplayModeIfNeeded()
         reconnectJob?.cancel()
         startGpsTelemetryFusion()
+        IqubeBleForegroundService.startService(context)
 
         val adapter = bluetoothAdapter
         if (adapter == null || !adapter.isEnabled) {
@@ -1237,6 +1262,7 @@ class IqubeBleManager(
                 beginActiveTripRecordingSession()
                 delay(450L)
                 _connectionPhase.value = BleConnectionPhase.STREAMING_ACTIVE
+                IqubeBleForegroundService.startService(context)
                 performConnectionHandshakeSequence()
                 startPeriodicSyncAndWatchdog()
             }
@@ -2100,6 +2126,7 @@ class IqubeBleManager(
         if (userInitiated) {
             reconnectJob?.cancel()
             scanJob?.cancel()
+            IqubeBleForegroundService.stopService(context)
         }
         captureLastParkedLocationOnDisconnect()
         finalizeSessionOnDisconnect(if (userInitiated) "Manual Disconnect" else "BLE Link Lost")
@@ -2126,5 +2153,16 @@ class IqubeBleManager(
         activeGatt = null
         notifyCharacteristic = null
         writeCharacteristic = null
+    }
+
+    companion object {
+        @Volatile
+        private var instance: IqubeBleManager? = null
+
+        fun getInstance(context: Context): IqubeBleManager {
+            return instance ?: synchronized(this) {
+                instance ?: IqubeBleManager(context.applicationContext).also { instance = it }
+            }
+        }
     }
 }

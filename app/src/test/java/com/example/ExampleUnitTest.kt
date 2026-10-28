@@ -433,6 +433,90 @@ class ExampleUnitTest {
                 subText = ""
             )
         )
+
+        // 6. User Field Bug Fix: "450 m | Kachipura Chowk | onto Central Bazar Road" with Right Turn Arrow
+        // Verify via Ticker Text:
+        val chowkViaTicker = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "450 m",
+            text = "Kachipura Chowk",
+            subText = "onto Central Bazar Road",
+            tickerText = "In 450 m, turn right at Kachipura Chowk onto Central Bazar Road"
+        )
+        assertNotNull(chowkViaTicker)
+        assertEquals(TurnTypeConstant.TURN_RIGHT, chowkViaTicker?.direction)
+        assertEquals(450, chowkViaTicker?.distanceMeters)
+
+        // Verify via Icon Resource Name:
+        val chowkViaIcon = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "450 m",
+            text = "Kachipura Chowk",
+            subText = "onto Central Bazar Road",
+            iconResourceName = "quantum_ic_turn_right_white_24"
+        )
+        assertNotNull(chowkViaIcon)
+        assertEquals(TurnTypeConstant.TURN_RIGHT, chowkViaIcon?.direction)
+        assertEquals(450, chowkViaIcon?.distanceMeters)
+
+        // Verify Countdown to 20m latches the ongoing TURN_RIGHT direction instead of reverting to straight:
+        val countdown20m = com.example.ble.GoogleMapsNotificationListenerService.parseNavigationNotification(
+            title = "20 m",
+            text = "Kachipura Chowk",
+            subText = "onto Central Bazar Road",
+            fallbackPreviousDirection = TurnTypeConstant.TURN_RIGHT
+        )
+        assertNotNull(countdown20m)
+        assertEquals("Countdown must preserve active TURN_RIGHT instead of defaulting to straight", TurnTypeConstant.TURN_RIGHT, countdown20m?.direction)
+        assertEquals(20, countdown20m?.distanceMeters)
+
+        // 7. Test All Right & Left Maneuver Phrase Variations:
+        assertEquals(
+            TurnTypeConstant.TURN_RIGHT,
+            com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Take right at the traffic signal")
+        )
+        assertEquals(
+            TurnTypeConstant.TURN_RIGHT,
+            com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Right onto Central Bazar Road")
+        )
+        assertEquals(
+            TurnTypeConstant.TURN_SHARPLY_RIGHT,
+            com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Sharp right onto Residency Rd")
+        )
+        assertEquals(
+            TurnTypeConstant.TURN_SLIGHTLY_RIGHT,
+            com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Bear right onto Outer Ring Rd")
+        )
+        assertEquals(
+            TurnTypeConstant.KEEP_RIGHT,
+            com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Keep right to stay on Wardha Flyover")
+        )
+        assertEquals(
+            TurnTypeConstant.FORK_RIGHT,
+            com.example.ble.GoogleMapsNotificationListenerService.matchManeuverPhrase("Fork right toward Airport Road")
+        )
+
+        // 8. Cluster Pictogram Opcode Normalization:
+        // Guarantees all right-turn variants map to TVS U347 native hardware opcode 0x03 (never falling back to 0x07 Straight):
+        assertEquals(0x03, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TURN_RIGHT.code))
+        assertEquals(0x03, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TAKE_RIGHT_AT.code))
+        assertEquals(0x03, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TAKE_RIGHT_AT_END.code))
+        assertEquals(0x00, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TURN_LEFT.code))
+        assertEquals(0x00, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TAKE_LEFT_AT.code))
+        assertEquals(0x04, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TURN_SHARPLY_RIGHT.code))
+        assertEquals(0x01, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TURN_SHARPLY_LEFT.code))
+        assertEquals(0x05, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TURN_SLIGHTLY_RIGHT.code))
+        assertEquals(0x02, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.TURN_SLIGHTLY_LEFT.code))
+        assertEquals(0x06, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.U_TURN.code))
+        assertEquals(0x06, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.RIGHT_U_TURN.code))
+        assertEquals(0x07, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.CONTINUE_STRAIGHT.code))
+        assertEquals(0x08, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.DESTINATION_REACHED.code))
+        assertEquals(0x0A, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.KEEP_RIGHT.code))
+        assertEquals(0x09, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.KEEP_LEFT.code))
+        assertEquals(0x10, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.FORK_RIGHT.code))
+        assertEquals(0x0F, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.FORK_LEFT.code))
+        assertEquals(0x44, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.ROUNDABOUT.code))
+        assertEquals(0x44, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.ROUNDABOUT_EXIT_1.code))
+        assertEquals(0x44, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.ROUNDABOUT_EXIT_2.code))
+        assertEquals(0x48, IqubeCommandDispatcher.normalizeClusterTurnCode(TurnTypeConstant.ROTARY.code))
     }
 }
 

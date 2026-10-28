@@ -369,8 +369,9 @@ class IqubeCommandDispatcher(
         p[6] = ((clampedRemDist shr 16) and 0xFF).toByte()
         p[7] = ((clampedRemDist shr 8) and 0xFF).toByte()
         p[8] = (clampedRemDist and 0xFF).toByte()
-        // Byte [9]: pictogram (turnCode 0x00..0x48)
-        p[9] = (turnCode and 0xFF).toByte()
+        // Byte [9]: pictogram (turnCode 0x00..0x48 normalized to cluster-native hardware opcodes)
+        val safeTurnCode = normalizeClusterTurnCode(turnCode)
+        p[9] = (safeTurnCode and 0xFF).toByte()
         // Byte [10]: oneString (0x01)
         p[10] = 0x01
         // Byte [11]: navOnOFF (0x01 = active, 0x00 = ended)
@@ -638,6 +639,53 @@ class IqubeCommandDispatcher(
                 listOf(cmd) + current
             }
             updated.take(40)
+        }
+    }
+
+    companion object {
+        /**
+         * Normalizes any turn maneuver opcode to the TVS iQube U347 TFT cluster's
+         * verified hardware pictogram asset codes:
+         * - 0x00: Left
+         * - 0x01: Sharp Left
+         * - 0x02: Slight Left
+         * - 0x03: Right
+         * - 0x04: Sharp Right
+         * - 0x05: Slight Right
+         * - 0x06: U-Turn
+         * - 0x07: Straight
+         * - 0x08: Destination Reached
+         * - 0x09: Keep Left
+         * - 0x0A: Keep Right
+         * - 0x0F: Fork Left
+         * - 0x10: Fork Right
+         * - 0x44: Roundabout
+         * - 0x48: Rotary
+         *
+         * Maps extended right/left variants (such as 0x0C, 0x0E, 0x15, 0x41..0x47)
+         * to the native hardware opcode so the cluster NEVER falls back to Straight (0x07).
+         */
+        fun normalizeClusterTurnCode(rawCode: Int): Int {
+            return when (rawCode) {
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0F, 0x10, 0x44, 0x48 -> rawCode
+
+                // Extended right turns -> 0x03 (Right) or 0x10 (Fork Right)
+                0x0C, 0x0E, 0x12, 0x14, 0x15, 0x22, 0x26, 0x27, 0x46, 0x47, 0x4B -> 0x03
+
+                // Extended left turns -> 0x00 (Left) or 0x0F (Fork Left)
+                0x0B, 0x0D, 0x13, 0x1F, 0x20, 0x21, 0x23, 0x45, 0x4A -> 0x00
+
+                // Extended U-turn -> 0x06 (U-Turn)
+                0x29 -> 0x06
+
+                // Extended roundabout exits -> 0x44 (Roundabout)
+                0x30, 0x41, 0x42, 0x43, 0x49 -> 0x44
+
+                // Middle fork -> Straight
+                0x11, 0x31 -> 0x07
+
+                else -> rawCode
+            }
         }
     }
 }

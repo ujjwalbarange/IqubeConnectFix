@@ -38,7 +38,7 @@ enum class DashboardDestination(val route: String, val title: String) {
 
 class IqubeDashboardViewModel(application: Application) : AndroidViewModel(application) {
 
-    val bleManager = IqubeBleManager(application.applicationContext)
+    val bleManager = IqubeBleManager.getInstance(application.applicationContext)
 
     private val _currentDestination = MutableStateFlow(DashboardDestination.COCKPIT)
     val currentDestination: StateFlow<DashboardDestination> = _currentDestination.asStateFlow()
@@ -288,6 +288,8 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
 
     override fun onCleared() {
         super.onCleared()
-        bleManager.disconnectBle(userInitiated = true)
+        // Do NOT disconnect BLE here!
+        // IqubeBleForegroundService keeps the Bluetooth connection and telemetry alive in the background
+        // when the user minimizes the app, goes to Home screen, or switches to Google Maps.
     }
 }

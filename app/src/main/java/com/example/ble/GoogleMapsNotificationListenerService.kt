@@ -2,6 +2,10 @@ package com.example.ble
 
 import android.app.Notification
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Icon
+import android.os.Build
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -85,7 +89,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val notification = sbn.notification ?: return
             val isOngoing = sbn.isOngoing || ((notification.flags and Notification.FLAG_ONGOING_EVENT) != 0)
             val category = notification.category
-            val extrasSnapshot = extractExtrasSnapshot(notification.extras)
+            val extrasSnapshot = extractExtrasSnapshot(context = this, notification = notification)
 
             serviceScope.launch {
                 runCatching {
@@ -129,7 +133,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
     private fun processGoogleMapsStatusBarNotification(sbn: StatusBarNotification) {
         val notification = sbn.notification ?: return
         val isOngoing = sbn.isOngoing || ((notification.flags and Notification.FLAG_ONGOING_EVENT) != 0)
-        val snapshot = extractExtrasSnapshot(notification.extras)
+        val snapshot = extractExtrasSnapshot(context = this, notification = notification)
         processExtractedNotificationSnapshot(
             isOngoing = isOngoing,
             category = notification.category,
@@ -154,7 +158,11 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val title: String,
             val text: String,
             val subText: String,
-            val bigText: String
+            val bigText: String,
+            val tickerText: String = "",
+            val allExtraStrings: List<String> = emptyList(),
+            val iconResourceName: String? = null,
+            val iconShapeDirection: TurnTypeConstant? = null
         )
 
         private val lastDispatchedKey = AtomicReference<DeduplicationKey?>(null)
@@ -241,24 +249,199 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
         }
 
-        internal fun extractExtrasSnapshot(extras: Bundle?): NotificationExtrasSnapshot {
-            if (extras == null) {
+        internal fun extractExtrasSnapshot(
+            context: Context? = null,
+            notification: Notification? = null,
+            extras: Bundle? = notification?.extras
+        ): NotificationExtrasSnapshot {
+            if (extras == null && notification == null) {
                 return NotificationExtrasSnapshot("", "", "", "")
             }
-            val title = extras.getCharSequenceSafe(Notification.EXTRA_TITLE_BIG)
-                .ifBlank { extras.getCharSequenceSafe(Notification.EXTRA_TITLE) }
-            val text = extras.getCharSequenceSafe(Notification.EXTRA_TEXT)
-            val bigText = extras.getCharSequenceSafe(Notification.EXTRA_BIG_TEXT)
-            val subText = extras.getCharSequenceSafe(Notification.EXTRA_SUB_TEXT)
-                .ifBlank { extras.getCharSequenceSafe(Notification.EXTRA_INFO_TEXT) }
-                .ifBlank { extras.getCharSequenceSafe(Notification.EXTRA_SUMMARY_TEXT) }
+            val title = extras?.getCharSequenceSafe(Notification.EXTRA_TITLE_BIG)
+                ?.ifBlank { extras.getCharSequenceSafe(Notification.EXTRA_TITLE) }.orEmpty()
+            val text = extras?.getCharSequenceSafe(Notification.EXTRA_TEXT).orEmpty()
+            val bigText = extras?.getCharSequenceSafe(Notification.EXTRA_BIG_TEXT).orEmpty()
+            val subText = extras?.getCharSequenceSafe(Notification.EXTRA_SUB_TEXT)
+                ?.ifBlank { extras.getCharSequenceSafe(Notification.EXTRA_INFO_TEXT) }
+                ?.ifBlank { extras.getCharSequenceSafe(Notification.EXTRA_SUMMARY_TEXT) }.orEmpty()
+
+            val tickerText = notification?.tickerText?.toString()?.replace('\u00A0', ' ')?.trim().orEmpty()
+
+            val allExtraStrings = mutableListOf<String>()
+            if (extras != null) {
+                for (key in extras.keySet()) {
+                    runCatching {
+                        when (val value = extras.get(key)) {
+                            is CharSequence -> {
+                                val s = value.toString().replace('\u00A0', ' ').trim()
+                                if (s.isNotBlank() && !allExtraStrings.contains(s)) allExtraStrings.add(s)
+                            }
+                            is Array<*> -> {
+                                value.forEach { item ->
+                                    if (item is CharSequence) {
+                                        val s = item.toString().replace('\u00A0', ' ').trim()
+                                        if (s.isNotBlank() && !allExtraStrings.contains(s)) allExtraStrings.add(s)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            var iconResName: String? = null
+            var iconShapeDir: TurnTypeConstant? = null
+
+            if (context != null && notification != null) {
+                val smallIcon = notification.smallIcon
+                val largeIcon = notification.getLargeIcon()
+
+                iconResName = resolveIconResourceName(context, smallIcon)
+                    ?: resolveIconResourceName(context, largeIcon)
+
+                val resTurn = parseDirectionFromIconResourceName(iconResName)
+                if (resTurn == null) {
+                    iconShapeDir = classifyArrowFromIcon(context, smallIcon)
+                        ?: classifyArrowFromIcon(context, largeIcon)
+                }
+            }
 
             return NotificationExtrasSnapshot(
                 title = title,
                 text = text,
                 subText = subText,
-                bigText = bigText
+                bigText = bigText,
+                tickerText = tickerText,
+                allExtraStrings = allExtraStrings,
+                iconResourceName = iconResName,
+                iconShapeDirection = iconShapeDir
             )
+        }
+
+        internal fun resolveIconResourceName(context: Context, icon: Icon?): String? {
+            if (icon == null) return null
+            return runCatching {
+                val pkg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    icon.resPackage
+                } else {
+                    val m = icon.javaClass.getMethod("getResPackage")
+                    m.invoke(icon) as? String
+                } ?: GOOGLE_MAPS_PACKAGE
+
+                val resId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    icon.resId
+                } else {
+                    val m = icon.javaClass.getMethod("getResId")
+                    (m.invoke(icon) as? Number)?.toInt() ?: 0
+                }
+
+                if (resId != 0) {
+                    val pm = context.packageManager
+                    val res = pm.getResourcesForApplication(pkg)
+                    res.getResourceEntryName(resId)
+                } else null
+            }.getOrNull()
+        }
+
+        internal fun classifyArrowFromIcon(context: Context, icon: Icon?): TurnTypeConstant? {
+            if (icon == null) return null
+            return runCatching {
+                val drawable = icon.loadDrawable(context) ?: return null
+                val width = 24
+                val height = 24
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+                drawable.setBounds(0, 0, width, height)
+                drawable.draw(canvas)
+
+                var leftWeight = 0
+                var rightWeight = 0
+                var topWeight = 0
+                var bottomWeight = 0
+                var nonTransparentPixels = 0
+
+                for (y in 0 until height) {
+                    for (x in 0 until width) {
+                        val pixel = bitmap.getPixel(x, y)
+                        val alpha = (pixel ushr 24) and 0xFF
+                        if (alpha > 40) {
+                            nonTransparentPixels++
+                            if (x < (width / 2 - 1)) leftWeight++
+                            else if (x > (width / 2 + 1)) rightWeight++
+
+                            if (y < height / 2) topWeight++
+                            else bottomWeight++
+                        }
+                    }
+                }
+
+                if (nonTransparentPixels < 10) return null
+
+                val rightBias = if (leftWeight > 0) rightWeight.toFloat() / leftWeight else rightWeight.toFloat()
+                val leftBias = if (rightWeight > 0) leftWeight.toFloat() / rightWeight else leftWeight.toFloat()
+
+                when {
+                    rightBias >= 1.5f -> TurnTypeConstant.TURN_RIGHT
+                    leftBias >= 1.5f -> TurnTypeConstant.TURN_LEFT
+                    bottomWeight > topWeight * 1.6f -> TurnTypeConstant.U_TURN
+                    else -> TurnTypeConstant.CONTINUE_STRAIGHT
+                }
+            }.getOrNull()
+        }
+
+        internal fun parseDirectionFromIconResourceName(resName: String?): TurnTypeConstant? {
+            if (resName.isNullOrBlank()) return null
+            val lower = resName.lowercase(Locale.US)
+
+            if (lower.contains("arrive") || lower.contains("destination") || lower.contains("finish")) {
+                return TurnTypeConstant.DESTINATION_REACHED
+            }
+            if (lower.contains("u_turn") || lower.contains("uturn")) {
+                return if (lower.contains("right")) TurnTypeConstant.RIGHT_U_TURN else TurnTypeConstant.U_TURN
+            }
+            if (lower.contains("roundabout") || lower.contains("rotary") || lower.contains("circle")) {
+                return when {
+                    lower.contains("1") || lower.contains("one") || lower.contains("first") -> TurnTypeConstant.ROUNDABOUT_EXIT_1
+                    lower.contains("2") || lower.contains("two") || lower.contains("second") -> TurnTypeConstant.ROUNDABOUT_EXIT_2
+                    lower.contains("3") || lower.contains("three") || lower.contains("third") -> TurnTypeConstant.ROUNDABOUT_EXIT_3
+                    lower.contains("left") -> TurnTypeConstant.ROUNDABOUT_LEFT
+                    else -> TurnTypeConstant.ROUNDABOUT
+                }
+            }
+            if (lower.contains("sharp_right") || lower.contains("sharply_right") || lower.contains("hard_right")) {
+                return TurnTypeConstant.TURN_SHARPLY_RIGHT
+            }
+            if (lower.contains("sharp_left") || lower.contains("sharply_left") || lower.contains("hard_left")) {
+                return TurnTypeConstant.TURN_SHARPLY_LEFT
+            }
+            if (lower.contains("slight_right") || lower.contains("slightly_right") || lower.contains("bear_right") || lower.contains("curve_right")) {
+                return TurnTypeConstant.TURN_SLIGHTLY_RIGHT
+            }
+            if (lower.contains("slight_left") || lower.contains("slightly_left") || lower.contains("bear_left") || lower.contains("curve_left")) {
+                return TurnTypeConstant.TURN_SLIGHTLY_LEFT
+            }
+            if (lower.contains("fork_right") || lower.contains("ramp_right") || lower.contains("exit_right")) {
+                return TurnTypeConstant.FORK_RIGHT
+            }
+            if (lower.contains("fork_left") || lower.contains("ramp_left") || lower.contains("exit_left")) {
+                return TurnTypeConstant.FORK_LEFT
+            }
+            if (lower.contains("keep_right") || lower.contains("stay_right")) {
+                return TurnTypeConstant.KEEP_RIGHT
+            }
+            if (lower.contains("keep_left") || lower.contains("stay_left")) {
+                return TurnTypeConstant.KEEP_LEFT
+            }
+            if (lower.contains("right") && !lower.contains("left")) {
+                return TurnTypeConstant.TURN_RIGHT
+            }
+            if (lower.contains("left") && !lower.contains("right")) {
+                return TurnTypeConstant.TURN_LEFT
+            }
+            if (lower.contains("straight") || lower.contains("continue") || lower.contains("proceed") || lower.contains("up")) {
+                return TurnTypeConstant.CONTINUE_STRAIGHT
+            }
+            return null
         }
 
         private fun Bundle.getCharSequenceSafe(key: String): String {
@@ -277,7 +460,11 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             title: String,
             text: String,
             subText: String,
-            bigText: String = ""
+            bigText: String = "",
+            tickerText: String = "",
+            extraStrings: List<String> = emptyList(),
+            iconResourceName: String? = null,
+            iconShapeDirection: TurnTypeConstant? = null
         ) {
             dispatchScope.launch {
                 runCatching {
@@ -288,7 +475,11 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                             title = title.trim(),
                             text = text.trim(),
                             subText = subText.trim(),
-                            bigText = bigText.trim()
+                            bigText = bigText.trim(),
+                            tickerText = tickerText.trim(),
+                            allExtraStrings = extraStrings,
+                            iconResourceName = iconResourceName,
+                            iconShapeDirection = iconShapeDirection
                         )
                     )
                 }
@@ -311,7 +502,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 return
             }
 
-            val combinedLower = "${snapshot.title} | ${snapshot.text} | ${snapshot.subText} | ${snapshot.bigText}"
+            val combinedLower = "${snapshot.title} | ${snapshot.text} | ${snapshot.subText} | ${snapshot.bigText} | ${snapshot.tickerText}"
                 .lowercase(Locale.US)
 
             if (combinedLower.isBlank() || isNonNavigationOrTransientAlert(combinedLower)) {
@@ -324,11 +515,17 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 return
             }
 
+            val previousKey = lastDispatchedKey.get()
             val parsed = parseNavigationNotification(
                 title = snapshot.title,
                 text = snapshot.text.ifBlank { snapshot.bigText },
                 subText = snapshot.subText,
-                category = category
+                category = category,
+                tickerText = snapshot.tickerText,
+                extraStrings = snapshot.allExtraStrings,
+                iconResourceName = snapshot.iconResourceName,
+                iconShapeDirection = snapshot.iconShapeDirection,
+                fallbackPreviousDirection = previousKey?.direction
             )
 
             if (parsed == null) {
@@ -351,7 +548,6 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 isDestinationArrived = parsed.isDestinationArrived
             )
 
-            val previousKey = lastDispatchedKey.get()
             if (previousKey == newKey) {
                 _listenerState.update {
                     it.copy(
@@ -420,23 +616,30 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             title: String,
             text: String,
             subText: String,
-            category: String? = Notification.CATEGORY_NAVIGATION
+            category: String? = Notification.CATEGORY_NAVIGATION,
+            tickerText: String = "",
+            extraStrings: List<String> = emptyList(),
+            iconResourceName: String? = null,
+            iconShapeDirection: TurnTypeConstant? = null,
+            fallbackPreviousDirection: TurnTypeConstant? = null
         ): ParsedGoogleMapsNavigation? {
             val cleanTitle = title.replace('\u00A0', ' ').trim()
             val cleanText = text.replace('\u00A0', ' ').trim()
             val cleanSubText = subText.replace('\u00A0', ' ').trim()
+            val cleanTicker = tickerText.replace('\u00A0', ' ').trim()
 
-            if (cleanTitle.isEmpty() && cleanText.isEmpty() && cleanSubText.isEmpty()) {
+            if (cleanTitle.isEmpty() && cleanText.isEmpty() && cleanSubText.isEmpty() && cleanTicker.isEmpty() && iconResourceName.isNullOrEmpty()) {
                 return null
             }
 
-            val combinedLower = "$cleanTitle | $cleanText | $cleanSubText".lowercase(Locale.US)
+            val combinedLower = "$cleanTitle | $cleanText | $cleanSubText | $cleanTicker".lowercase(Locale.US)
             if (isNonNavigationOrTransientAlert(combinedLower)) {
                 return null
             }
 
-            val extractedDistance = parseDistanceToTurnMeters(cleanTitle, cleanText)
-            val isArrival = isDestinationArrivalText(cleanTitle, cleanText, cleanSubText, extractedDistance)
+            val extractedDistance = parseDistanceToTurnMeters(cleanTitle, cleanText.ifBlank { cleanTicker })
+            val isArrival = isDestinationArrivalText(cleanTitle, cleanText, cleanSubText, extractedDistance) ||
+                (iconResourceName != null && parseDirectionFromIconResourceName(iconResourceName) == TurnTypeConstant.DESTINATION_REACHED)
 
             if (isArrival) {
                 return ParsedGoogleMapsNavigation(
@@ -451,19 +654,44 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 )
             }
 
-            val direction = parseTurnDirection(cleanTitle, cleanText, cleanSubText)
+            // Direction Extraction with multi-tier resolution:
+            // 1. Icon resource name check
+            val iconDirection = parseDirectionFromIconResourceName(iconResourceName)
+
+            // 2. Text direction from all textual sources (tickerText, title, text, subText, extraStrings)
+            val allCandidates = buildList {
+                if (cleanTicker.isNotBlank()) add(cleanTicker)
+                if (cleanTitle.isNotBlank()) add(cleanTitle)
+                if (cleanText.isNotBlank()) add(cleanText)
+                if (cleanSubText.isNotBlank()) add(cleanSubText)
+                addAll(extraStrings)
+            }
+            val textDirection = parseTurnDirectionFromCandidates(allCandidates)
+
+            // 3. Fallback to icon shape analysis (pixel distribution)
+            val shapeDirection = iconShapeDirection
+
             val etaPair = parseEtaDurationHoursAndMinutes(cleanSubText, cleanText, cleanTitle)
 
             // Reject generic background notifications that lack both a navigation category and turn/distance/ETA cues
             val hasNavCategory = category == Notification.CATEGORY_NAVIGATION
-            if (direction == null && extractedDistance == null) {
+            if (textDirection == null && iconDirection == null && shapeDirection == null && extractedDistance == null) {
                 return null
             }
-            if (!hasNavCategory && direction == null && etaPair == null) {
+            if (!hasNavCategory && textDirection == null && iconDirection == null && etaPair == null) {
                 return null
             }
 
-            val resolvedDirection = direction ?: TurnTypeConstant.CONTINUE_STRAIGHT
+            // Priority: Explicit text direction -> Icon resource name -> Icon shape -> Latch previous direction (if countdown in progress) -> CONTINUE_STRAIGHT
+            val resolvedDirection = textDirection
+                ?: iconDirection
+                ?: shapeDirection
+                ?: (if ((extractedDistance ?: 0) > 0 && fallbackPreviousDirection != null && fallbackPreviousDirection != TurnTypeConstant.DESTINATION_REACHED) {
+                    fallbackPreviousDirection
+                } else {
+                    TurnTypeConstant.CONTINUE_STRAIGHT
+                })
+
             val resolvedDistanceMeters = (extractedDistance ?: 0).coerceIn(0, 65535)
             val (etaHours, etaMinutes) = etaPair ?: (0 to 0)
 
@@ -518,11 +746,13 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             text: String,
             subText: String = ""
         ): TurnTypeConstant? {
-            // Candidates ordered from most specific maneuver text to fallback subtext
             val candidates = listOf(title, text, "$title $text", subText)
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
+            return parseTurnDirectionFromCandidates(candidates)
+        }
 
+        internal fun parseTurnDirectionFromCandidates(candidates: List<String>): TurnTypeConstant? {
             for (rawCandidate in candidates) {
                 // Strip street suffix after "onto / toward / towards / on" to isolate the maneuver verb first
                 val maneuverPrefixOnly = rawCandidate
@@ -538,7 +768,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             return null
         }
 
-        private fun matchManeuverPhrase(input: String): TurnTypeConstant? {
+        internal fun matchManeuverPhrase(input: String): TurnTypeConstant? {
             if (input.isBlank()) return null
             val lower = input.lowercase(Locale.US)
 
@@ -637,6 +867,9 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             if (lower.contains("exit left") || lower.contains("left exit") || lower.contains("ramp on the left")) {
                 return TurnTypeConstant.HIGHWAY_EXIT_LEFT
             }
+            if (lower.contains("exit right") || lower.contains("right exit") || lower.contains("ramp on the right")) {
+                return TurnTypeConstant.FORK_RIGHT
+            }
             if (lower.contains("enter highway") || lower.contains("onto highway") || lower.contains("merge onto")) {
                 return TurnTypeConstant.HIGHWAY_ENTER_LEFT
             }
@@ -656,36 +889,43 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
 
             // 8. Take Left / Take Right at end or intersection
-            if (lower.contains("left at the end") || lower.contains("take left at end")) {
-                return TurnTypeConstant.TAKE_LEFT_AT_END
+            // Maps to standard TURN_LEFT / TURN_RIGHT so cluster firmware displays native arrows
+            if (lower.contains("left at the end") || lower.contains("take left at end") || lower.contains("take left") || lower.contains("take the left")) {
+                return TurnTypeConstant.TURN_LEFT
             }
-            if (lower.contains("right at the end") || lower.contains("take right at end")) {
-                return TurnTypeConstant.TAKE_RIGHT_AT_END
-            }
-            if (lower.contains("take left") || lower.contains("take the left")) {
-                return TurnTypeConstant.TAKE_LEFT_AT
-            }
-            if (lower.contains("take right") || lower.contains("take the right")) {
-                return TurnTypeConstant.TAKE_RIGHT_AT
+            if (lower.contains("right at the end") || lower.contains("take right at end") || lower.contains("take right") || lower.contains("take the right")) {
+                return TurnTypeConstant.TURN_RIGHT
             }
 
             // 9. Standard Turn Left / Turn Right
-            if (
-                lower.contains("turn left") ||
-                lower.contains("left onto") ||
-                lower.contains("left toward") ||
-                Regex("""\bleft\b""").containsMatchIn(lower)
-            ) {
-                return TurnTypeConstant.TURN_LEFT
-            }
-            if (
-                lower.contains("turn right") ||
+            // Check multi-word directional cues first:
+            val hasExplicitTurnRight = lower.contains("turn right") ||
                 lower.contains("right onto") ||
                 lower.contains("right toward") ||
-                Regex("""\bright\b""").containsMatchIn(lower)
-            ) {
-                return TurnTypeConstant.TURN_RIGHT
-            }
+                lower.contains("right towards") ||
+                lower.contains("right at") ||
+                lower.contains("right turn") ||
+                lower.contains("make a right") ||
+                lower.contains("next right")
+
+            val hasExplicitTurnLeft = lower.contains("turn left") ||
+                lower.contains("left onto") ||
+                lower.contains("left toward") ||
+                lower.contains("left towards") ||
+                lower.contains("left at") ||
+                lower.contains("left turn") ||
+                lower.contains("make a left") ||
+                lower.contains("next left")
+
+            if (hasExplicitTurnRight && !hasExplicitTurnLeft) return TurnTypeConstant.TURN_RIGHT
+            if (hasExplicitTurnLeft && !hasExplicitTurnRight) return TurnTypeConstant.TURN_LEFT
+
+            // Isolated token matching:
+            val matchesRight = Regex("""\bright\b""").containsMatchIn(lower)
+            val matchesLeft = Regex("""\bleft\b""").containsMatchIn(lower)
+
+            if (matchesRight && !matchesLeft) return TurnTypeConstant.TURN_RIGHT
+            if (matchesLeft && !matchesRight) return TurnTypeConstant.TURN_LEFT
 
             // 10. Straight / Continue / Head / Merge
             if (lower.contains("straight at")) {

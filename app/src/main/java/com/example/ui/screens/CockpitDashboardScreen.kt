@@ -1725,6 +1725,122 @@ private fun TurnByTurnNavigationInjectorCard(
                 }
             }
 
+            if (!isNotifAccessGranted) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(AmberWarning.copy(alpha = 0.15f))
+                        .border(1.dp, AmberWarning, RoundedCornerShape(10.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "⚠️ RESTRICTED SETTING DETECTED (Android 13+)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = AmberWarning
+                    )
+                    Text(
+                        text = "If \"Allow notification access\" is greyed out with \"Controlled by restricted setting\", follow these 3 quick steps:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "1. Tap \"1. Open App Info\" below.\n2. Tap the ⋮ (Three Dots) menu in the top-right corner.\n3. Tap \"Allow restricted settings\" and confirm with fingerprint/PIN.\n4. Return here, tap \"2. Open Notification Access\", and flip the toggle ON!",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                runCatching {
+                                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                        data = Uri.fromParts("package", context.packageName, null)
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = AmberWarning, contentColor = SlateSurface),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("open_app_info_restricted_button")
+                        ) {
+                            Text("1. Open App Info (⋮ to Allow)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = {
+                                runCatching {
+                                    val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = SlateSurface),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("grant_notification_access_button")
+                        ) {
+                            Text("2. Open Notification Access", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // Background Keep-Alive & Battery Optimization Status Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(SlateSurface.copy(alpha = 0.6f))
+                    .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "BACKGROUND PROCESS: FOREGROUND SERVICE ACTIVE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonMint
+                    )
+                    Text(
+                        text = "App stays connected when on home screen or in Google Maps",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        runCatching {
+                            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = Uri.parse("package:${context.packageName}")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                        }.onFailure {
+                            runCatching {
+                                val altIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(altIntent)
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("battery_optimization_button")
+                ) {
+                    Text("Disable Battery Limits", color = ElectricCyan, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1733,37 +1849,15 @@ private fun TurnByTurnNavigationInjectorCard(
                 OutlinedButton(
                     onClick = onSimulateGoogleMapsNotificationClick,
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .testTag("simulate_gmaps_notification_button")
                 ) {
                     Text(
-                        text = "Test Google Maps Notification",
+                        text = "Test Google Maps Notification Parser (Simulate Step)",
                         color = ElectricCyan,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold
                     )
-                }
-                if (!isNotifAccessGranted) {
-                    Button(
-                        onClick = {
-                            runCatching {
-                                val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = AmberWarning, contentColor = SlateSurface),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("grant_notification_access_button")
-                    ) {
-                        Text(
-                            text = "Grant Notification Access",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
                 }
             }
         }

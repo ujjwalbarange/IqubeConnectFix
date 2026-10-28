@@ -24,6 +24,14 @@
     <!-- Internet permission for OpenStreetMap Nominatim reverse-geocoding of cluster location name -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Foreground Service permissions to keep BLE connected & GPS running in the background -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="false" />
@@ -59,6 +67,13 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- Persistent Foreground Service to prevent background disconnection when minimizing app or switching apps -->
+        <service
+            android:name=".ble.IqubeBleForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|location" />
     </application>
 
 </manifest>
