@@ -14,8 +14,10 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.IconCompat
 import com.example.MainActivity
 import com.example.model.BleConnectionPhase
+import com.example.tile.IqubeQuickSettingsTileService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,6 +28,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Persistent Foreground Service that keeps the BLE GATT connection, periodic telemetry sync,
@@ -62,11 +65,20 @@ class IqubeBleForegroundService : Service() {
     }
 
     private fun startInForeground() {
+        val bleManager = IqubeBleManager.getInstance(applicationContext)
+        val tele = bleManager.packetParser.telemetryState.value
+        val lastSeen = bleManager.lastSeenState.value
+        val batPct = tele.batteryPercent ?: lastSeen?.batteryPct ?: 93
+        val rangeKm = (tele.clusterRangeKm ?: lastSeen?.clusterRangeKm ?: 98.0).roundToInt()
+
         val initialNotification = buildNotification(
             title = "TVS iQube Cockpit",
             contentText = "Active background connection • Ready for telemetry",
             isRiding = false,
-            isConnected = false
+            isConnected = false,
+            batteryPct = batPct,
+            rangeKm = rangeKm,
+            isCharging = false
         )
 
         try {
@@ -128,13 +140,31 @@ class IqubeBleForegroundService : Service() {
                     BleConnectionPhase.REPLAYING_CHARGING_LOG
                 )
 
+                val currentBatPct = state.tele.batteryPercent
+                    ?: state.parked?.batteryPercentAtPark
+                    ?: bleManager.lastSeenState.value?.batteryPct
+                    ?: 93
+                val currentRangeKm = (
+                    state.tele.clusterRangeKm
+                        ?: state.parked?.rangeKmAtPark
+                        ?: bleManager.lastSeenState.value?.clusterRangeKm
+                        ?: 98.0
+                    ).roundToInt()
+                val isChargingNow = isConnected && state.tele.isCharging
+
+                // Keep Quick Settings Control Center tile updated with latest battery % & range km
+                IqubeQuickSettingsTileService.requestTileUpdate(applicationContext)
+
                 if (!state.notifEnabled) {
                     updateNotification(
                         title = "iQube Cockpit",
                         contentText = if (isConnected) "Connected in background" else "Background service running",
                         subText = if (isConnected) "Connected" else "Idle",
                         isRiding = (state.tele.speedKmh ?: 0) > 0,
-                        isConnected = isConnected
+                        isConnected = isConnected,
+                        batteryPct = currentBatPct,
+                        rangeKm = currentRangeKm,
+                        isCharging = isChargingNow
                     )
                 } else when (state.phase) {
                     BleConnectionPhase.STREAMING_ACTIVE,
@@ -162,7 +192,10 @@ class IqubeBleForegroundService : Service() {
                                 contentText = "Range: $dte (True: $trueEco) • To 80%: $to80 • Full: $to100",
                                 subText = "Charging Active",
                                 isRiding = false,
-                                isConnected = true
+                                isConnected = true,
+                                batteryPct = currentBatPct,
+                                rangeKm = currentRangeKm,
+                                isCharging = true
                             )
                         } else {
                             updateNotification(
@@ -170,7 +203,10 @@ class IqubeBleForegroundService : Service() {
                                 contentText = "Battery: $bat • Range: $dte (True Eco: $trueEco • Pwr: $truePwr)",
                                 subText = "Live Cockpit",
                                 isRiding = (state.tele.speedKmh ?: 0) > 0,
-                                isConnected = true
+                                isConnected = true,
+                                batteryPct = currentBatPct,
+                                rangeKm = currentRangeKm,
+                                isCharging = false
                             )
                         }
                     }
@@ -185,7 +221,10 @@ class IqubeBleForegroundService : Service() {
                             contentText = "Scanning & linking ${state.devName} in background",
                             subText = "Connecting",
                             isRiding = false,
-                            isConnected = false
+                            isConnected = false,
+                            batteryPct = currentBatPct,
+                            rangeKm = currentRangeKm,
+                            isCharging = false
                         )
                     }
                     BleConnectionPhase.DISCONNECTED -> {
@@ -202,7 +241,10 @@ class IqubeBleForegroundService : Service() {
                             contentText = "Battery: $bat • Range: $dte (True: $trueEco) • 📍 $loc",
                             subText = if (state.autoReconnect) "Scanning to reconnect..." else "Disconnected",
                             isRiding = false,
-                            isConnected = false
+                            isConnected = false,
+                            batteryPct = currentBatPct,
+                            rangeKm = currentRangeKm,
+                            isCharging = false
                         )
 
                         if (!state.autoReconnect) {
@@ -221,7 +263,10 @@ class IqubeBleForegroundService : Service() {
                             contentText = "Establishing encrypted Bluetooth channel...",
                             subText = "Pairing",
                             isRiding = false,
-                            isConnected = false
+                            isConnected = false,
+                            batteryPct = currentBatPct,
+                            rangeKm = currentRangeKm,
+                            isCharging = false
                         )
                     }
                 }
@@ -234,11 +279,17 @@ class IqubeBleForegroundService : Service() {
         contentText: String,
         subText: String,
         isRiding: Boolean,
-        isConnected: Boolean
+        isConnected: Boolean,
+        batteryPct: Int = 93,
+        rangeKm: Int = 98,
+        isCharging: Boolean = false
     ) {
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         runCatching {
-            notificationManager.notify(NOTIFICATION_ID, buildNotification(title, contentText, subText, isRiding, isConnected))
+            notificationManager.notify(
+                NOTIFICATION_ID,
+                buildNotification(title, contentText, subText, isRiding, isConnected, batteryPct, rangeKm, isCharging)
+            )
         }
     }
 
@@ -247,7 +298,10 @@ class IqubeBleForegroundService : Service() {
         contentText: String,
         subText: String = "Connected",
         isRiding: Boolean = false,
-        isConnected: Boolean = true
+        isConnected: Boolean = true,
+        batteryPct: Int = 93,
+        rangeKm: Int = 98,
+        isCharging: Boolean = false
     ): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -259,8 +313,14 @@ class IqubeBleForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val dynamicBitmap = IqubeQuickSettingsTileService.createBatteryRangeTileBitmap(
+            batteryPct = batteryPct.coerceIn(0, 100),
+            rangeKm = rangeKm.coerceAtLeast(0),
+            isCharging = isCharging
+        )
+
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(IconCompat.createWithBitmap(dynamicBitmap))
             .setContentTitle(title)
             .setContentText(contentText)
             .setSubText(subText)

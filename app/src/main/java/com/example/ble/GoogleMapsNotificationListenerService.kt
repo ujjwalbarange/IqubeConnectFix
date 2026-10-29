@@ -251,6 +251,27 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
         }
 
+        private val UI_ACTION_LABELS_TO_IGNORE = setOf(
+            "exit navigation",
+            "exit",
+            "dismiss",
+            "mute",
+            "unmute",
+            "stop",
+            "hide",
+            "share",
+            "re-centre",
+            "re-center",
+            "overview",
+            "preview",
+            "steps"
+        )
+
+        private fun isIgnoredUiLabel(text: String): Boolean {
+            val lower = text.lowercase(Locale.US).trim()
+            return lower.isEmpty() || lower in UI_ACTION_LABELS_TO_IGNORE
+        }
+
         internal fun extractExtrasSnapshot(
             context: Context? = null,
             notification: Notification? = null,
@@ -270,53 +291,119 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val tickerText = notification?.tickerText?.toString()?.replace('\u00A0', ' ')?.trim().orEmpty()
 
             val allExtraStrings = mutableListOf<String>()
+            val candidateIcons = mutableListOf<Icon>()
+            val candidateBitmaps = mutableListOf<Bitmap>()
+
             if (extras != null) {
                 for (key in extras.keySet()) {
                     runCatching {
+                        // Never inspect EXTRA_SMALL_ICON for turn direction (it is the static Maps app icon)
+                        if (key == Notification.EXTRA_SMALL_ICON) return@runCatching
                         when (val value = extras.get(key)) {
                             is CharSequence -> {
                                 val s = value.toString().replace('\u00A0', ' ').trim()
-                                if (s.isNotBlank() && !allExtraStrings.contains(s)) allExtraStrings.add(s)
+                                if (!isIgnoredUiLabel(s) && !allExtraStrings.contains(s)) {
+                                    allExtraStrings.add(s)
+                                }
                             }
                             is Array<*> -> {
                                 value.forEach { item ->
                                     if (item is CharSequence) {
                                         val s = item.toString().replace('\u00A0', ' ').trim()
-                                        if (s.isNotBlank() && !allExtraStrings.contains(s)) allExtraStrings.add(s)
+                                        if (!isIgnoredUiLabel(s) && !allExtraStrings.contains(s)) {
+                                            allExtraStrings.add(s)
+                                        }
                                     }
                                 }
+                            }
+                            is Icon -> {
+                                if (!candidateIcons.contains(value)) candidateIcons.add(value)
+                            }
+                            is Bitmap -> {
+                                if (!candidateBitmaps.contains(value)) candidateBitmaps.add(value)
                             }
                         }
                     }
                 }
             }
 
-            // Extract all text lines from Google Maps custom RemoteViews (contentView, bigContentView, headsUpContentView)
             if (notification != null) {
-                val remoteStrings = buildList {
-                    addAll(extractStringsFromRemoteViews(notification.contentView))
-                    addAll(extractStringsFromRemoteViews(notification.bigContentView))
-                    addAll(extractStringsFromRemoteViews(notification.headsUpContentView))
+                // Prioritize notification.getLargeIcon() and deprecated largeIcon Bitmap (the white maneuver graphic)
+                // NEVER use notification.smallIcon, which is always the static Google Maps status-bar app icon!
+                notification.getLargeIcon()?.let { icon ->
+                    if (!candidateIcons.contains(icon)) candidateIcons.add(0, icon)
                 }
-                for (s in remoteStrings) {
-                    if (!allExtraStrings.contains(s)) allExtraStrings.add(s)
+                @Suppress("DEPRECATION")
+                notification.largeIcon?.let { bmp ->
+                    if (!candidateBitmaps.contains(bmp)) candidateBitmaps.add(0, bmp)
+                }
+
+                // Extract strings, TalkBack contentDescriptions, Icons, and Bitmaps from custom RemoteViews
+                val remoteViewsList = listOfNotNull(
+                    notification.bigContentView,
+                    notification.contentView,
+                    notification.headsUpContentView
+                )
+                for (rv in remoteViewsList) {
+                    val rvStrings = extractStringsFromRemoteViews(rv, context)
+                    for (s in rvStrings) {
+                        if (!isIgnoredUiLabel(s) && !allExtraStrings.contains(s)) {
+                            allExtraStrings.add(s)
+                        }
+                    }
+                    val (rvIcons, rvBitmaps) = extractIconsAndBitmapsFromRemoteViews(rv, context)
+                    for (ic in rvIcons) {
+                        if (!candidateIcons.contains(ic)) candidateIcons.add(ic)
+                    }
+                    for (bmp in rvBitmaps) {
+                        if (!candidateBitmaps.contains(bmp)) candidateBitmaps.add(bmp)
+                    }
                 }
             }
 
             var iconResName: String? = null
             var iconShapeDir: TurnTypeConstant? = null
 
-            if (context != null && notification != null) {
-                val smallIcon = notification.smallIcon
-                val largeIcon = notification.getLargeIcon()
-
-                iconResName = resolveIconResourceName(context, smallIcon)
-                    ?: resolveIconResourceName(context, largeIcon)
+            if (context != null) {
+                // 1. Check resource names on candidate maneuver icons
+                for (icon in candidateIcons) {
+                    val resName = resolveIconResourceName(context, icon)
+                    if (!resName.isNullOrBlank()) {
+                        if (iconResName == null) iconResName = resName
+                        if (parseDirectionFromIconResourceName(resName) != null) {
+                            iconResName = resName
+                            break
+                        }
+                    }
+                }
 
                 val resTurn = parseDirectionFromIconResourceName(iconResName)
                 if (resTurn == null) {
-                    iconShapeDir = classifyArrowFromIcon(context, smallIcon)
-                        ?: classifyArrowFromIcon(context, largeIcon)
+                    // 2. Classify maneuver bitmap / icon pixel geometry
+                    for (icon in candidateIcons) {
+                        val dir = classifyArrowFromIcon(context, icon)
+                        if (dir != null) {
+                            iconShapeDir = dir
+                            break
+                        }
+                    }
+                    if (iconShapeDir == null) {
+                        for (bmp in candidateBitmaps) {
+                            val dir = classifyManeuverBitmap(bmp)
+                            if (dir != null) {
+                                iconShapeDir = dir
+                                break
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (bmp in candidateBitmaps) {
+                    val dir = classifyManeuverBitmap(bmp)
+                    if (dir != null) {
+                        iconShapeDir = dir
+                        break
+                    }
                 }
             }
 
@@ -332,29 +419,186 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             )
         }
 
-        internal fun extractStringsFromRemoteViews(rv: android.widget.RemoteViews?): List<String> {
+        internal fun extractStringsFromRemoteViews(
+            rv: android.widget.RemoteViews?,
+            context: Context? = null
+        ): List<String> {
             if (rv == null) return emptyList()
-            val strings = mutableListOf<String>()
-            runCatching {
-                val actionsField = rv.javaClass.getDeclaredField("mActions")
-                actionsField.isAccessible = true
-                val actions = actionsField.get(rv) as? List<*> ?: return emptyList()
-                for (action in actions) {
-                    if (action == null) continue
-                    for (field in action.javaClass.declaredFields) {
-                        runCatching {
-                            field.isAccessible = true
-                            when (val v = field.get(action)) {
-                                is CharSequence -> {
-                                    val s = v.toString().replace('\u00A0', ' ').trim()
-                                    if (s.isNotBlank() && !strings.contains(s)) strings.add(s)
-                                }
+            val contentDescriptions = mutableListOf<String>()
+            val otherStrings = mutableListOf<String>()
+
+            // 1. Try inflating the RemoteViews to inspect actual View contentDescriptions (TalkBack maneuver labels) and TextView texts
+            if (context != null) {
+                runCatching {
+                    val remoteContext = runCatching {
+                        context.createPackageContext(GOOGLE_MAPS_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
+                    }.getOrNull() ?: context
+                    val container = android.widget.FrameLayout(remoteContext)
+                    val inflated = rv.apply(remoteContext, container)
+                    val queue = ArrayDeque<android.view.View>()
+                    queue.add(inflated)
+                    while (queue.isNotEmpty()) {
+                        val view = queue.removeFirst()
+                        val desc = view.contentDescription?.toString()?.replace('\u00A0', ' ')?.trim().orEmpty()
+                        if (!isIgnoredUiLabel(desc) && !contentDescriptions.contains(desc)) {
+                            contentDescriptions.add(desc)
+                        }
+                        if (view is android.widget.TextView) {
+                            val t = view.text?.toString()?.replace('\u00A0', ' ')?.trim().orEmpty()
+                            if (!isIgnoredUiLabel(t) && !otherStrings.contains(t)) {
+                                otherStrings.add(t)
+                            }
+                        }
+                        if (view is android.view.ViewGroup) {
+                            for (i in 0 until view.childCount) {
+                                view.getChildAt(i)?.let { queue.add(it) }
                             }
                         }
                     }
                 }
             }
-            return strings
+
+            // 2. Walk mActions and ALL superclasses (e.g., BaseReflectionAction.value for setContentDescription / setText)
+            runCatching {
+                var rvClass: Class<*>? = rv.javaClass
+                var actions: List<*>? = null
+                while (rvClass != null && rvClass != Any::class.java && actions == null) {
+                    runCatching {
+                        val f = rvClass!!.getDeclaredField("mActions")
+                        f.isAccessible = true
+                        actions = f.get(rv) as? List<*>
+                    }
+                    rvClass = rvClass.superclass
+                }
+                for (action in actions.orEmpty()) {
+                    if (action == null) continue
+                    var methodName = ""
+                    var cls: Class<*>? = action.javaClass
+                    val actionStrings = mutableListOf<String>()
+                    while (cls != null && cls != Any::class.java) {
+                        for (field in cls.declaredFields) {
+                            runCatching {
+                                field.isAccessible = true
+                                val v = field.get(action)
+                                if (field.name == "methodName" && v is String) {
+                                    methodName = v
+                                } else if (v is CharSequence) {
+                                    val s = v.toString().replace('\u00A0', ' ').trim()
+                                    if (!isIgnoredUiLabel(s) && !actionStrings.contains(s)) {
+                                        actionStrings.add(s)
+                                    }
+                                }
+                            }
+                        }
+                        cls = cls.superclass
+                    }
+                    for (s in actionStrings) {
+                        if (methodName.equals("setContentDescription", ignoreCase = true)) {
+                            if (!contentDescriptions.contains(s)) contentDescriptions.add(s)
+                        } else {
+                            if (!otherStrings.contains(s)) otherStrings.add(s)
+                        }
+                    }
+                }
+            }
+
+            // Put contentDescriptions FIRST because Google Maps sets the exact turn instruction on the maneuver ImageView's contentDescription
+            return (contentDescriptions + otherStrings).distinct()
+        }
+
+        internal fun extractIconsAndBitmapsFromRemoteViews(
+            rv: android.widget.RemoteViews?,
+            context: Context? = null
+        ): Pair<List<Icon>, List<Bitmap>> {
+            if (rv == null) return emptyList<Icon>() to emptyList()
+            val icons = mutableListOf<Icon>()
+            val bitmaps = mutableListOf<Bitmap>()
+
+            // 1. Inspect mActions across superclasses for Icon / Bitmap values
+            runCatching {
+                var rvClass: Class<*>? = rv.javaClass
+                var actions: List<*>? = null
+                while (rvClass != null && rvClass != Any::class.java && actions == null) {
+                    runCatching {
+                        val f = rvClass!!.getDeclaredField("mActions")
+                        f.isAccessible = true
+                        actions = f.get(rv) as? List<*>
+                    }
+                    rvClass = rvClass.superclass
+                }
+                for (action in actions.orEmpty()) {
+                    if (action == null) continue
+                    var cls: Class<*>? = action.javaClass
+                    while (cls != null && cls != Any::class.java) {
+                        for (field in cls.declaredFields) {
+                            runCatching {
+                                field.isAccessible = true
+                                when (val v = field.get(action)) {
+                                    is Icon -> if (!icons.contains(v)) icons.add(v)
+                                    is Bitmap -> if (v.width >= 20 && v.height >= 20 && !bitmaps.contains(v)) bitmaps.add(v)
+                                }
+                            }
+                        }
+                        cls = cls.superclass
+                    }
+                }
+            }
+
+            // 2. Inspect mBitmapCache on RemoteViews
+            runCatching {
+                var rvClass: Class<*>? = rv.javaClass
+                while (rvClass != null && rvClass != Any::class.java) {
+                    runCatching {
+                        val cacheField = rvClass!!.getDeclaredField("mBitmapCache")
+                        cacheField.isAccessible = true
+                        val cache = cacheField.get(rv)
+                        if (cache != null) {
+                            val bitmapsField = cache.javaClass.getDeclaredField("mBitmaps")
+                            bitmapsField.isAccessible = true
+                            val list = bitmapsField.get(cache) as? List<*>
+                            list?.forEach { item ->
+                                if (item is Bitmap && item.width >= 20 && item.height >= 20 && !bitmaps.contains(item)) {
+                                    bitmaps.add(item)
+                                }
+                            }
+                        }
+                    }
+                    rvClass = rvClass.superclass
+                }
+            }
+
+            // 3. Fallback: inspect ImageViews from inflated RemoteViews
+            if (context != null && icons.isEmpty() && bitmaps.isEmpty()) {
+                runCatching {
+                    val remoteContext = runCatching {
+                        context.createPackageContext(GOOGLE_MAPS_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
+                    }.getOrNull() ?: context
+                    val container = android.widget.FrameLayout(remoteContext)
+                    val inflated = rv.apply(remoteContext, container)
+                    val queue = ArrayDeque<android.view.View>()
+                    queue.add(inflated)
+                    while (queue.isNotEmpty()) {
+                        val view = queue.removeFirst()
+                        if (view is android.widget.ImageView) {
+                            val d = view.drawable
+                            if (d != null && d.intrinsicWidth >= 24 && d.intrinsicHeight >= 24) {
+                                val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+                                val canvas = Canvas(bmp)
+                                d.setBounds(0, 0, 64, 64)
+                                d.draw(canvas)
+                                bitmaps.add(bmp)
+                            }
+                        }
+                        if (view is android.view.ViewGroup) {
+                            for (i in 0 until view.childCount) {
+                                view.getChildAt(i)?.let { queue.add(it) }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return icons to bitmaps
         }
 
         internal fun resolveIconResourceName(context: Context, icon: Icon?): String? {
@@ -396,51 +640,273 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     ?: icon.loadDrawable(context)
                     ?: return null
 
-                val width = 48
-                val height = 48
-                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val size = 64
+                val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(bitmap)
-                drawable.setBounds(0, 0, width, height)
+                drawable.setBounds(0, 0, size, size)
                 drawable.draw(canvas)
 
-                var leftTop = 0
-                var rightTop = 0
-                var leftBottom = 0
-                var rightBottom = 0
-                var nonTransparentPixels = 0
+                classifyManeuverBitmap(bitmap)
+            }.getOrNull()
+        }
 
-                val midX = width / 2
-                val midY = height / 2
+        /**
+         * Classifies a Google Maps maneuver [Bitmap] using normalized bounding-box geometry,
+         * horizontal scanline run-count topology (to detect hollow U-turn arches and roundabout circles),
+         * and upper-vs-lower horizontal center-of-mass shift.
+         *
+         * Accurately distinguishes:
+         * - [TurnTypeConstant.U_TURN] (standard U-turn `↶`/`↷` and Roundabout U-turn with upper loop + two bottom stems)
+         * - [TurnTypeConstant.ROUNDABOUT] / [TurnTypeConstant.ROUNDABOUT_LEFT]
+         * - [TurnTypeConstant.TURN_RIGHT] (`↱`) & [TurnTypeConstant.TURN_SLIGHTLY_RIGHT] (`↗`) & [TurnTypeConstant.TURN_SHARPLY_RIGHT] (`↘`)
+         * - [TurnTypeConstant.TURN_LEFT] (`↰`) & [TurnTypeConstant.TURN_SLIGHTLY_LEFT] (`↖`) & [TurnTypeConstant.TURN_SHARPLY_LEFT] (`↙`)
+         * - [TurnTypeConstant.CONTINUE_STRAIGHT] (`↑`)
+         */
+        internal fun classifyManeuverBitmap(sourceBitmap: Bitmap?): TurnTypeConstant? {
+            if (sourceBitmap == null || sourceBitmap.width < 8 || sourceBitmap.height < 8) return null
+            return runCatching {
+                val size = 64
+                val bitmap = if (sourceBitmap.width == size && sourceBitmap.height == size) {
+                    sourceBitmap
+                } else {
+                    Bitmap.createScaledBitmap(sourceBitmap, size, size, true)
+                }
 
-                for (y in 0 until height) {
-                    for (x in 0 until width) {
-                        val pixel = bitmap.getPixel(x, y)
-                        val alpha = (pixel ushr 24) and 0xFF
-                        if (alpha > 40) {
-                            nonTransparentPixels++
-                            if (y < midY) {
-                                if (x < midX) leftTop++ else rightTop++
-                            } else {
-                                if (x < midX) leftBottom++ else rightBottom++
+                // 1. Identify foreground maneuver arrow pixels (prefer bright white arrow pixels so any dark/colored notification circle is ignored)
+                var whiteCount = 0
+                var opaqueCount = 0
+                for (y in 0 until size) {
+                    for (x in 0 until size) {
+                        val px = bitmap.getPixel(x, y)
+                        val a = (px ushr 24) and 0xFF
+                        if (a > 70) {
+                            opaqueCount++
+                            val r = (px ushr 16) and 0xFF
+                            val g = (px ushr 8) and 0xFF
+                            val b = px and 0xFF
+                            if (a > 110 && r > 170 && g > 170 && b > 170) {
+                                whiteCount++
                             }
                         }
                     }
                 }
 
-                if (nonTransparentPixels < 10) return null
+                val useWhiteMask = whiteCount in 14..(size * size * 3 / 4)
+                val fg = Array(size) { BooleanArray(size) }
+                var minX = size
+                var maxX = -1
+                var minY = size
+                var maxY = -1
+                var fgCount = 0
 
-                val totalLeft = leftTop + leftBottom
-                val totalRight = rightTop + rightBottom
-
-                // Right-turn arrow (↱): the upper branch and arrowhead point to the right
-                val isRight = (rightTop > leftTop * 1.15f) || (totalRight > totalLeft * 1.15f)
-                val isLeft = (leftTop > rightTop * 1.15f) || (totalLeft > totalRight * 1.15f)
-
-                when {
-                    isRight && !isLeft -> TurnTypeConstant.TURN_RIGHT
-                    isLeft && !isRight -> TurnTypeConstant.TURN_LEFT
-                    else -> TurnTypeConstant.CONTINUE_STRAIGHT
+                for (y in 0 until size) {
+                    for (x in 0 until size) {
+                        val px = bitmap.getPixel(x, y)
+                        val a = (px ushr 24) and 0xFF
+                        val r = (px ushr 16) and 0xFF
+                        val g = (px ushr 8) and 0xFF
+                        val b = px and 0xFF
+                        val isFg = if (useWhiteMask) {
+                            a > 110 && r > 170 && g > 170 && b > 170
+                        } else {
+                            a > 70
+                        }
+                        if (isFg) {
+                            fg[y][x] = true
+                            fgCount++
+                            if (x < minX) minX = x
+                            if (x > maxX) maxX = x
+                            if (y < minY) minY = y
+                            if (y > maxY) maxY = y
+                        }
+                    }
                 }
+
+                val bw = maxX - minX + 1
+                val bh = maxY - minY + 1
+                if (fgCount < 14 || bw < 6 || bh < 6) return null
+
+                // 2. Compute normalized bounding-box statistics (nx, ny in [0.0, 1.0])
+                var topSumX = 0f
+                var topCount = 0
+                var veryTopSumX = 0f
+                var veryTopCount = 0
+                var bottomSumX = 0f
+                var bottomCount = 0
+
+                var topLeft = 0
+                var topRight = 0
+                var bottomLeft = 0
+                var bottomRight = 0
+
+                var leftEdgeSumY = 0f
+                var leftEdgeCount = 0
+                var rightEdgeSumY = 0f
+                var rightEdgeCount = 0
+
+                var topCapHits = 0
+                var topCapTotal = 0
+                var centerCoreHits = 0
+                var centerCoreTotal = 0
+
+                for (y in minY..maxY) {
+                    val ny = (y - minY).toFloat() / (bh - 1).coerceAtLeast(1)
+                    for (x in minX..maxX) {
+                        val nx = (x - minX).toFloat() / (bw - 1).coerceAtLeast(1)
+
+                        if (ny <= 0.20f && nx in 0.34f..0.66f) {
+                            topCapTotal++
+                            if (fg[y][x]) topCapHits++
+                        }
+                        if (ny in 0.24f..0.48f && nx in 0.38f..0.62f) {
+                            centerCoreTotal++
+                            if (fg[y][x]) centerCoreHits++
+                        }
+
+                        if (!fg[y][x]) continue
+
+                        if (ny < 0.22f) {
+                            veryTopSumX += nx
+                            veryTopCount++
+                        }
+                        if (ny < 0.50f) {
+                            topSumX += nx
+                            topCount++
+                            if (nx < 0.50f) topLeft++ else topRight++
+                        }
+                        if (ny >= 0.54f) {
+                            bottomSumX += nx
+                            bottomCount++
+                            if (nx < 0.50f) bottomLeft++ else bottomRight++
+                        }
+                        if (nx <= 0.22f) {
+                            leftEdgeSumY += ny
+                            leftEdgeCount++
+                        }
+                        if (nx >= 0.78f) {
+                            rightEdgeSumY += ny
+                            rightEdgeCount++
+                        }
+                    }
+                }
+
+                if (topCount == 0 || bottomCount == 0) return null
+
+                val topMeanX = topSumX / topCount
+                val veryTopMeanX = if (veryTopCount > 0) veryTopSumX / veryTopCount else topMeanX
+                val bottomMeanX = bottomSumX / bottomCount
+                val leftEdgeMeanY = if (leftEdgeCount > 0) leftEdgeSumY / leftEdgeCount else 0.5f
+                val rightEdgeMeanY = if (rightEdgeCount > 0) rightEdgeSumY / rightEdgeCount else 0.5f
+                val topCapDensity = if (topCapTotal > 0) topCapHits.toFloat() / topCapTotal else 0f
+                val centerCoreDensity = if (centerCoreTotal > 0) centerCoreHits.toFloat() / centerCoreTotal else 0f
+
+                // 3. Count separated horizontal foreground runs per scanline in upper-mid (0.20..0.54) and lower (0.54..0.86)
+                val minGapPx = (bw / 11).coerceAtLeast(2)
+                fun countRunsInRow(y: Int): Int {
+                    var runs = 0
+                    var inRun = false
+                    var gap = 0
+                    for (x in minX..maxX) {
+                        if (fg[y][x]) {
+                            if (!inRun) {
+                                if (runs == 0 || gap >= minGapPx) {
+                                    runs++
+                                }
+                                inRun = true
+                            }
+                            gap = 0
+                        } else if (inRun) {
+                            gap++
+                            if (gap >= minGapPx) {
+                                inRun = false
+                            }
+                        }
+                    }
+                    return runs
+                }
+
+                var midRows = 0
+                var midTwoRunRows = 0
+                var bottomRows = 0
+                var bottomTwoRunRows = 0
+
+                for (y in minY..maxY) {
+                    val ny = (y - minY).toFloat() / (bh - 1).coerceAtLeast(1)
+                    val runs = countRunsInRow(y)
+                    if (ny in 0.20f..0.54f) {
+                        midRows++
+                        if (runs >= 2) midTwoRunRows++
+                    } else if (ny in 0.54f..0.86f) {
+                        bottomRows++
+                        if (runs >= 2) bottomTwoRunRows++
+                    }
+                }
+
+                val midTwoRunRatio = if (midRows > 0) midTwoRunRows.toFloat() / midRows else 0f
+                val bottomTwoRunRatio = if (bottomRows > 0) bottomTwoRunRows.toFloat() / bottomRows else 0f
+
+                val bottomHasTwoSides = bottomLeft >= (bottomCount * 0.16f) && bottomRight >= (bottomCount * 0.16f)
+                val hasUpperHollowLoop = centerCoreDensity < 0.26f && midTwoRunRatio >= 0.22f && topCapDensity >= 0.14f
+
+                // Rule 1: U-Turn (`↶`/`↷`) & Roundabout U-Turn (as in Screenshot_20261029-001507: hollow circle/arch at top + 2 separated stems at bottom)
+                if (hasUpperHollowLoop && bottomTwoRunRatio >= 0.18f && bottomHasTwoSides) {
+                    // Check if a roundabout has a strong lateral upper exit arm vs exiting straight down (U-turn)
+                    return when {
+                        topMeanX in 0.39f..0.61f -> TurnTypeConstant.U_TURN
+                        topMeanX < 0.39f -> TurnTypeConstant.ROUNDABOUT_LEFT
+                        else -> TurnTypeConstant.ROUNDABOUT
+                    }
+                }
+
+                // Also catch standard U-turn where the arch is at the top, center core is hollow, and two parallel legs run down the middle & bottom
+                if (centerCoreDensity < 0.28f && topCapDensity >= 0.16f && topMeanX in 0.38f..0.62f && midTwoRunRatio >= 0.30f && bottomTwoRunRatio >= 0.20f) {
+                    return TurnTypeConstant.U_TURN
+                }
+
+                // Rule 2: Sharp Right (`↘`) & Sharp Left (`↙`) (vertical stem + downward-pointing diagonal arm in lower half)
+                if (bottomTwoRunRatio >= 0.20f && bottomHasTwoSides && !hasUpperHollowLoop) {
+                    if (rightEdgeCount > leftEdgeCount && rightEdgeMeanY >= 0.50f && topMeanX < 0.52f) {
+                        return TurnTypeConstant.TURN_SHARPLY_RIGHT
+                    }
+                    if (leftEdgeCount > rightEdgeCount && leftEdgeMeanY >= 0.50f && topMeanX > 0.48f) {
+                        return TurnTypeConstant.TURN_SHARPLY_LEFT
+                    }
+                }
+
+                // Rule 3: 90° Turn Right (`↱`) & Slight Right (`↗`)
+                // In a right turn, the upper arm/arrowhead shifts right relative to the bottom vertical stem (`topMeanX > bottomMeanX`)
+                val dx = topMeanX - bottomMeanX
+                val isStemLeftTipRight = dx > 0.08f && bottomMeanX < 0.49f && rightEdgeCount > 0 && rightEdgeMeanY < 0.58f
+                val isUpperHeavyRight = topRight > topLeft * 1.22f && topMeanX > 0.52f && bottomRight < bottomLeft * 1.15f
+
+                if (isStemLeftTipRight || isUpperHeavyRight) {
+                    return if (veryTopMeanX > 0.66f && rightEdgeMeanY < 0.18f && bottomMeanX < 0.38f) {
+                        TurnTypeConstant.TURN_SLIGHTLY_RIGHT
+                    } else {
+                        TurnTypeConstant.TURN_RIGHT
+                    }
+                }
+
+                // Rule 4: 90° Turn Left (`↰`) & Slight Left (`↖`)
+                // In a left turn, the upper arm/arrowhead shifts left relative to the bottom vertical stem (`topMeanX < bottomMeanX`)
+                val isStemRightTipLeft = dx < -0.08f && bottomMeanX > 0.51f && leftEdgeCount > 0 && leftEdgeMeanY < 0.58f
+                val isUpperHeavyLeft = topLeft > topRight * 1.22f && topMeanX < 0.48f && bottomLeft < bottomRight * 1.15f
+
+                if (isStemRightTipLeft || isUpperHeavyLeft) {
+                    return if (veryTopMeanX < 0.34f && leftEdgeMeanY < 0.18f && bottomMeanX > 0.62f) {
+                        TurnTypeConstant.TURN_SLIGHTLY_LEFT
+                    } else {
+                        TurnTypeConstant.TURN_LEFT
+                    }
+                }
+
+                // Rule 5: Roundabout with single bottom entry stem and hollow upper circle
+                if (hasUpperHollowLoop) {
+                    return if (topMeanX < 0.46f) TurnTypeConstant.ROUNDABOUT_LEFT else TurnTypeConstant.ROUNDABOUT
+                }
+
+                // Rule 6: Continue Straight (`↑`)
+                TurnTypeConstant.CONTINUE_STRAIGHT
             }.getOrNull()
         }
 
@@ -1054,9 +1520,9 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
         ): String {
             val candidates = mutableListOf<String>()
             fun addClean(s: String) {
-                s.split('\n', '·', '|').forEach { part ->
+                s.split('\n', '·', '|', '/').forEach { part ->
                     val clean = part.replace('\u00A0', ' ').trim()
-                    if (clean.isNotBlank() && !candidates.contains(clean)) {
+                    if (clean.isNotBlank() && !isIgnoredUiLabel(clean) && !candidates.contains(clean)) {
                         candidates.add(clean)
                     }
                 }
@@ -1074,12 +1540,14 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 val lower = s.lowercase(Locale.US)
                 !DISTANCE_TOKEN_REGEX.matches(s) &&
                     !CLOCK_TIME_REGEX.matches(s) &&
+                    !isIgnoredUiLabel(s) &&
                     !lower.contains("min") &&
                     !lower.contains("hr") &&
                     !lower.contains("cyclonic") &&
                     !lower.contains("traffic") &&
                     !lower.contains("fastest") &&
                     !lower.contains("dismiss") &&
+                    !lower.contains("exit navigation") &&
                     !lower.contains("rerouting") &&
                     !lower.contains("searching for") &&
                     !lower.startsWith("then ↱") &&
@@ -1091,7 +1559,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             var bestLocalityName: String? = null
 
             val roadKeywordRegex = Regex("""(?i)\b(?:road|rd|marg|street|st|chowk|square|sq|nagar|flyover|bypass|lane|ln|ave|avenue|blvd|highway|hwy|expwy|circle|path|way)\b""")
-            val prepositionRegex = Regex("""(?i)\b(?:towards|toward|onto|on|into|along|to)\s+([A-Za-z0-9\s.'/-]+)""")
+            val prepositionRegex = Regex("""(?i)\b(?:towards|toward|onto|on|into|along|to)\s+([A-Za-z0-9\s.'-]+)""")
 
             for (cand in filtered) {
                 val prepMatch = prepositionRegex.find(cand)
@@ -1103,7 +1571,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     .replace(DISTANCE_TOKEN_REGEX, "")
                     .trim()
 
-                if (cleanedTarget.isBlank()) continue
+                if (cleanedTarget.isBlank() || isIgnoredUiLabel(cleanedTarget)) continue
 
                 val lowerTarget = cleanedTarget.lowercase(Locale.US)
                 if (lowerTarget == "turn right" || lowerTarget == "turn left" || lowerTarget == "continue" || lowerTarget == "destination") {
@@ -1132,7 +1600,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 .replace(Regex("""(?i)\bexpressway\b"""), "Expwy")
                 .replace(Regex("""(?i)\bsquare\b"""), "Sq")
                 .replace(Regex("""(?i)^(?:towards|toward|onto|on|into)\s+"""), "")
-                .replace(Regex("""[^A-Za-z0-9\s.'/-]"""), "")
+                .replace(Regex("""[^A-Za-z0-9\s.'-]"""), "")
                 .trim()
 
             return abbreviated.take(17)
