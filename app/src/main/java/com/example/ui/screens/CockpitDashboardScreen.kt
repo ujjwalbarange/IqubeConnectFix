@@ -178,6 +178,9 @@ fun CockpitDashboardScreen(
     onSetChargingAlertType: (ChargingAlertType) -> Unit = {},
     onStopChargingAlarm: () -> Unit = {},
     onTestChargingAlert: () -> Unit = {},
+    onSimulateDisconnectWhileChargingClick: () -> Unit = {},
+    onCalibrateOfflineBatterySoc: (Int) -> Unit = {},
+    onStopOfflinePredictedChargingClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -210,7 +213,8 @@ fun CockpitDashboardScreen(
                 if (lastSeenState != null) {
                     OfflineLastSeenSnapshotCard(
                         lastSeen = lastSeenState,
-                        trueRange = trueRange
+                        trueRange = trueRange,
+                        chargingMonitor = chargingMonitor
                     )
                 }
             }
@@ -219,19 +223,24 @@ fun CockpitDashboardScreen(
             HeroBatteryAndTrueRangeCard(
                 telemetry = telemetry,
                 lastSeenState = lastSeenState,
+                chargingMonitor = chargingMonitor,
                 trueRange = trueRange,
                 selectedRangeMode = selectedRangeMode,
                 onSelectRangeMode = onSelectRangeMode,
                 onToggleChargingClick = onToggleChargingClick
             )
 
-            // 2. LIVE CHARGING MONITOR VIEW (Debounced 3-Frame Gate: 0x11 B5==0x01 && 0x13 B5==0x06 && speed==0)
-            AnimatedVisibility(visible = telemetry.isCharging) {
+            // 2. LIVE & OFFLINE PREDICTED CHARGING MONITOR VIEW (Continues when scooter is turned off / disconnected while charging)
+            AnimatedVisibility(visible = telemetry.isCharging || chargingMonitor.isCharging || chargingMonitor.needsCalibration) {
                 LiveChargingMonitorCard(
                     telemetry = telemetry,
                     chargingMonitor = chargingMonitor,
+                    chargingAlertConfig = chargingAlertConfig,
                     trueRange = trueRange,
-                    onSimulateChargingStepClick = onSimulateChargingStepClick
+                    onSimulateChargingStepClick = onSimulateChargingStepClick,
+                    onSimulateDisconnectWhileChargingClick = onSimulateDisconnectWhileChargingClick,
+                    onCalibrateOfflineBatterySoc = onCalibrateOfflineBatterySoc,
+                    onStopOfflinePredictedChargingClick = onStopOfflinePredictedChargingClick
                 )
             }
 
@@ -821,7 +830,8 @@ private fun HandlebarMediaEventToastBanner(
 @Composable
 private fun OfflineLastSeenSnapshotCard(
     lastSeen: LastSeenScooterState,
-    trueRange: TrueRangeCalculation
+    trueRange: TrueRangeCalculation,
+    chargingMonitor: ChargingMonitorState = ChargingMonitorState()
 ) {
     val context = LocalContext.current
     val exactTimeStr = remember(lastSeen.timestampMs) {
@@ -834,13 +844,15 @@ private fun OfflineLastSeenSnapshotCard(
         elapsedMinutes < 60L -> "$elapsedMinutes mins ago"
         else -> "${elapsedMinutes / 60L}h ${elapsedMinutes % 60L}m ago"
     }
+    val needsCal = chargingMonitor.needsCalibration || lastSeen.needsCalibration
+    val displayedSoc = chargingMonitor.currentBatteryPct ?: lastSeen.batteryPct
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(SlateCardElevated)
-            .border(1.dp, ElectricCyan.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+            .border(1.dp, if (needsCal) AmberWarning else ElectricCyan.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
             .padding(14.dp)
             .testTag("offline_last_seen_card"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -850,19 +862,25 @@ private fun OfflineLastSeenSnapshotCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                 Icon(
-                    imageVector = Icons.Default.History,
+                    imageVector = if (needsCal) Icons.Default.BatteryAlert else Icons.Default.History,
                     contentDescription = "Offline Last Seen Snapshot",
-                    tint = ElectricCyan,
+                    tint = if (needsCal) AmberWarning else ElectricCyan,
                     modifier = Modifier.size(16.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "OFFLINE LAST SEEN STATE (${lastSeen.vehicleId})",
+                    text = if (chargingMonitor.isDisconnectedPredicted) {
+                        "OFFLINE PREDICTED CHARGING (${lastSeen.vehicleId}) • NEEDS CALIBRATION"
+                    } else if (needsCal) {
+                        "OFFLINE STATE (${lastSeen.vehicleId}) • ⚠️ NEEDS CALIBRATION"
+                    } else {
+                        "OFFLINE LAST SEEN STATE (${lastSeen.vehicleId})"
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = ElectricCyan
+                    color = if (needsCal) AmberWarning else ElectricCyan
                 )
             }
             Text(
@@ -873,7 +891,7 @@ private fun OfflineLastSeenSnapshotCard(
         }
 
         Text(
-            text = "Location: ${lastSeen.locationName} (${String.format(Locale.US, "%.4f, %.4f", lastSeen.latitude, lastSeen.longitude)})  •  Last SoC: ${lastSeen.batteryPct}%  •  ODO: ${String.format(Locale.US, "%,.1f km", lastSeen.odometerKm)}  •  Cluster BMS DTE: ${String.format(Locale.US, "%.1f km", lastSeen.clusterRangeKm)}",
+            text = "Location: ${lastSeen.locationName} (${String.format(Locale.US, "%.4f, %.4f", lastSeen.latitude, lastSeen.longitude)})  •  ${if (chargingMonitor.isDisconnectedPredicted) "Predicted SoC" else "Last SoC"}: $displayedSoc%${if (needsCal) " (Needs Calibration)" else ""}  •  ODO: ${String.format(Locale.US, "%,.1f km", lastSeen.odometerKm)}  •  Cluster BMS DTE: ${String.format(Locale.US, "%.1f km", chargingMonitor.clusterRangeKm ?: lastSeen.clusterRangeKm)}",
             style = MaterialTheme.typography.bodyMedium,
             color = TextPrimary
         )
@@ -884,7 +902,7 @@ private fun OfflineLastSeenSnapshotCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Expected True Range at ${lastSeen.batteryPct}%: Eco ${trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.1f km", it) } ?: "--"}  |  Power ${trueRange.truePowerRangeKm?.let { String.format(Locale.US, "%.1f km", it) } ?: "--"}",
+                text = "Expected True Range at $displayedSoc%: Eco ${trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.1f km", it) } ?: "--"}  |  Power ${trueRange.truePowerRangeKm?.let { String.format(Locale.US, "%.1f km", it) } ?: "--"}",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Bold,
                 color = NeonMint,
@@ -933,14 +951,21 @@ private fun OfflineLastSeenSnapshotCard(
 private fun HeroBatteryAndTrueRangeCard(
     telemetry: TelemetryState,
     lastSeenState: LastSeenScooterState?,
+    chargingMonitor: ChargingMonitorState = ChargingMonitorState(),
     trueRange: TrueRangeCalculation,
     selectedRangeMode: RideMode,
     onSelectRangeMode: (RideMode) -> Unit,
     onToggleChargingClick: () -> Unit
 ) {
-    val effectiveSoc = telemetry.batteryPercent ?: lastSeenState?.batteryPct
-    val effectiveClusterRangeKm = telemetry.clusterRangeKm ?: lastSeenState?.clusterRangeKm
+    val effectiveSoc = telemetry.batteryPercent
+        ?: (if (chargingMonitor.isDisconnectedPredicted) chargingMonitor.currentBatteryPct else null)
+        ?: lastSeenState?.batteryPct
+    val effectiveClusterRangeKm = telemetry.clusterRangeKm
+        ?: (if (chargingMonitor.isDisconnectedPredicted) chargingMonitor.clusterRangeKm else null)
+        ?: lastSeenState?.clusterRangeKm
     val isLive = telemetry.batteryPercent != null
+    val isAnyCharging = telemetry.isCharging || chargingMonitor.isCharging
+    val needsCal = chargingMonitor.needsCalibration || lastSeenState?.needsCalibration == true
     val isPowerMode = selectedRangeMode == RideMode.POWER
 
     val displayedTrueRange = if (isPowerMode) {
@@ -982,7 +1007,16 @@ private fun HeroBatteryAndTrueRangeCard(
                     colors = listOf(SlateCardElevated, SlateSurface)
                 )
             )
-            .border(1.dp, if (telemetry.isCharging) NeonMint.copy(alpha = pulseAlpha) else SlateBorder, RoundedCornerShape(20.dp))
+            .border(
+                1.dp,
+                when {
+                    chargingMonitor.isDisconnectedPredicted -> AmberWarning.copy(alpha = pulseAlpha)
+                    isAnyCharging -> NeonMint.copy(alpha = pulseAlpha)
+                    needsCal -> AmberWarning.copy(alpha = 0.7f)
+                    else -> SlateBorder
+                },
+                RoundedCornerShape(20.dp)
+            )
             .padding(18.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -992,17 +1026,33 @@ private fun HeroBatteryAndTrueRangeCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = if (isLive) "BATTERY SoC (0x13) & DYNAMIC TRUE RANGE" else "LAST SEEN BATTERY SoC & EXPECTED RANGE",
+                text = when {
+                    isLive -> "BATTERY SoC (0x13) & DYNAMIC TRUE RANGE"
+                    chargingMonitor.isDisconnectedPredicted -> "OFFLINE PREDICTED CHARGING SoC • NEEDS CALIBRATION"
+                    needsCal -> "PREDICTED BATTERY SoC • ⚠️ NEEDS CALIBRATION"
+                    else -> "LAST SEEN BATTERY SoC & EXPECTED RANGE"
+                },
                 style = MaterialTheme.typography.labelMedium,
-                color = TextSecondary
+                color = if (needsCal) AmberWarning else TextSecondary,
+                modifier = Modifier.weight(1f)
             )
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(12.dp))
-                    .background(if (telemetry.isCharging) NeonMint.copy(alpha = 0.18f) else SlateSurface)
+                    .background(
+                        when {
+                            chargingMonitor.isDisconnectedPredicted -> AmberWarning.copy(alpha = 0.18f)
+                            telemetry.isCharging -> NeonMint.copy(alpha = 0.18f)
+                            else -> SlateSurface
+                        }
+                    )
                     .border(
                         1.dp,
-                        if (telemetry.isCharging) NeonMint.copy(alpha = pulseAlpha) else SlateBorder,
+                        when {
+                            chargingMonitor.isDisconnectedPredicted -> AmberWarning.copy(alpha = pulseAlpha)
+                            telemetry.isCharging -> NeonMint.copy(alpha = pulseAlpha)
+                            else -> SlateBorder
+                        },
                         RoundedCornerShape(12.dp)
                     )
                     .clickable(onClick = onToggleChargingClick)
@@ -1013,19 +1063,27 @@ private fun HeroBatteryAndTrueRangeCard(
                 Icon(
                     imageVector = Icons.Default.Bolt,
                     contentDescription = "Charging State",
-                    tint = if (telemetry.isCharging) NeonMint else TextSecondary,
+                    tint = when {
+                        chargingMonitor.isDisconnectedPredicted -> AmberWarning
+                        telemetry.isCharging -> NeonMint
+                        else -> TextSecondary
+                    },
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = if (telemetry.isCharging) {
-                        "CHARGING ACTIVE (0x06 / 0x01)"
-                    } else {
-                        "TAP FOR CHARGE REPLAY"
+                    text = when {
+                        chargingMonitor.isDisconnectedPredicted -> "PREDICTED CHARGING • CALIBRATE"
+                        telemetry.isCharging -> "CHARGING ACTIVE (0x06 / 0x01)"
+                        else -> "TAP FOR CHARGE REPLAY"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
-                    color = if (telemetry.isCharging) NeonMint else TextSecondary
+                    color = when {
+                        chargingMonitor.isDisconnectedPredicted -> AmberWarning
+                        telemetry.isCharging -> NeonMint
+                        else -> TextSecondary
+                    }
                 )
             }
         }
@@ -1140,18 +1198,24 @@ private fun HeroBatteryAndTrueRangeCard(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = effectiveSoc?.let { "Battery SoC: $it %" } ?: "Battery SoC: -- %",
+                    text = effectiveSoc?.let {
+                        if (chargingMonitor.isDisconnectedPredicted) "Predicted SoC: $it %" else "Battery SoC: $it %"
+                    } ?: "Battery SoC: -- %",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = TextPrimary,
+                    color = if (chargingMonitor.isDisconnectedPredicted) AmberWarning else TextPrimary,
                     modifier = Modifier.testTag("battery_soc_text")
                 )
                 Text(
-                    text = effectiveClusterRangeKm?.let {
-                        String.format(Locale.US, "Cluster BMS DTE: %.1f km", it)
-                    } ?: "Cluster BMS DTE: --.- km",
+                    text = if (needsCal) {
+                        "⚠️ Needs Calibration (Connect Scooter)"
+                    } else {
+                        effectiveClusterRangeKm?.let {
+                            String.format(Locale.US, "Cluster BMS DTE: %.1f km", it)
+                        } ?: "Cluster BMS DTE: --.- km"
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = ElectricCyan,
+                    color = if (needsCal) AmberWarning else ElectricCyan,
                     modifier = Modifier.testTag("cluster_bms_dte_text")
                 )
             }
@@ -1186,9 +1250,9 @@ private fun HeroBatteryAndTrueRangeCard(
                     color = TextPrimary
                 )
                 Text(
-                    text = "0x5A 0x13 B[3..4]/10",
+                    text = if (needsCal) "Needs Calibration" else "0x5A 0x13 B[3..4]/10",
                     style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
+                    color = if (needsCal) AmberWarning else TextSecondary
                 )
             }
 
@@ -1282,21 +1346,34 @@ private fun HeroBatteryAndTrueRangeCard(
             val flag0x13 = telemetry.stateFlag0x13Byte5?.let { String.format("0x%02X", it) } ?: "--"
             val flag0x11 = telemetry.chargingFlag0x11Byte5?.let { String.format("0x%02X", it) } ?: "--"
             Text(
-                text = "13[B5]:$flag0x13 • 11[B5]:$flag0x11",
+                text = if (chargingMonitor.isDisconnectedPredicted) {
+                    "Offline Predicted • Needs Cal"
+                } else {
+                    "13[B5]:$flag0x13 • 11[B5]:$flag0x11"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
-                color = if (telemetry.isCharging) NeonMint else TextSecondary
+                color = when {
+                    chargingMonitor.isDisconnectedPredicted -> AmberWarning
+                    telemetry.isCharging -> NeonMint
+                    else -> TextSecondary
+                }
             )
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun LiveChargingMonitorCard(
     telemetry: TelemetryState,
     chargingMonitor: ChargingMonitorState,
+    chargingAlertConfig: ChargingAlertConfig = ChargingAlertConfig(),
     trueRange: TrueRangeCalculation,
-    onSimulateChargingStepClick: () -> Unit
+    onSimulateChargingStepClick: () -> Unit,
+    onSimulateDisconnectWhileChargingClick: () -> Unit = {},
+    onCalibrateOfflineBatterySoc: (Int) -> Unit = {},
+    onStopOfflinePredictedChargingClick: () -> Unit = {}
 ) {
     val etaFmt = remember { SimpleDateFormat("hh:mm a", Locale.US) }
     val nowMs = System.currentTimeMillis()
@@ -1308,12 +1385,22 @@ private fun LiveChargingMonitorCard(
         etaFmt.format(Date(nowMs + it * 1000L))
     } ?: "--:--"
 
+    val isOfflinePred = chargingMonitor.isDisconnectedPredicted
+    val needsCal = chargingMonitor.needsCalibration
+    var calibrateSliderSoc by remember(chargingMonitor.currentBatteryPct) {
+        mutableFloatStateOf((chargingMonitor.currentBatteryPct ?: 50).toFloat())
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
             .background(SlateSurface)
-            .border(1.5.dp, NeonMint.copy(alpha = 0.7f), RoundedCornerShape(18.dp))
+            .border(
+                1.5.dp,
+                if (isOfflinePred || needsCal) AmberWarning.copy(alpha = 0.85f) else NeonMint.copy(alpha = 0.7f),
+                RoundedCornerShape(18.dp)
+            )
             .padding(16.dp)
             .testTag("live_charging_monitor_card"),
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1325,18 +1412,23 @@ private fun LiveChargingMonitorCard(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                 Icon(
-                    imageVector = Icons.Default.Bolt,
+                    imageVector = if (isOfflinePred || needsCal) Icons.Default.BatteryAlert else Icons.Default.Bolt,
                     contentDescription = "Charging Active",
-                    tint = NeonMint,
+                    tint = if (isOfflinePred || needsCal) AmberWarning else NeonMint,
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Column {
                     Text(
-                        text = "CHARGING ACTIVE (3-FRAME DEBOUNCED) • 3-TIER TIME PREDICTOR",
+                        text = when {
+                            isOfflinePred -> "OFFLINE PREDICTED CHARGING • ⚠️ NEEDS CALIBRATION"
+                            needsCal -> "CHARGING CALIBRATION REQUIRED • ⚠️ NEEDS CALIBRATION"
+                            else -> "CHARGING ACTIVE (3-FRAME DEBOUNCED) • INTERVAL ANALYZER"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = NeonMint
+                        color = if (isOfflinePred || needsCal) AmberWarning else NeonMint,
+                        modifier = Modifier.testTag("charging_monitor_header_title")
                     )
                     Text(
                         text = chargingMonitor.predictionModeLabel,
@@ -1345,15 +1437,165 @@ private fun LiveChargingMonitorCard(
                     )
                 }
             }
-            OutlinedButton(
-                onClick = onSimulateChargingStepClick,
-                modifier = Modifier.testTag("simulate_1pct_step_button")
-            ) {
-                Text("+1% Step (115.7s)", color = NeonMint, style = MaterialTheme.typography.labelSmall)
+            if (chargingMonitor.isCharging) {
+                OutlinedButton(
+                    onClick = onSimulateChargingStepClick,
+                    modifier = Modifier.testTag("simulate_1pct_step_button")
+                ) {
+                    Text(
+                        text = if (isOfflinePred) "+1% Pred Step" else "+1% Step (115.7s)",
+                        color = if (isOfflinePred) AmberWarning else NeonMint,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
             }
         }
 
-        // Live SoC, Cluster Range (0x13), True Eco Range & Speed (+31.1%/hr = 115.7s/%)
+        // When Connected & Charging: Quick Test Button for Disconnecting While Charging (Turning Off Scooter Key)
+        if (telemetry.isCharging && !isOfflinePred) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SlateCardElevated)
+                    .border(1.dp, ElectricCyan.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Scooter Ignition Off While Charging Protection",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    Text(
+                        text = "If you turn off your scooter while plugged in, this charging section stays active, advances % using your learned curve, keeps the ${chargingAlertConfig.targetPct}% alarm armed, and flags Needs Calibration.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                OutlinedButton(
+                    onClick = onSimulateDisconnectWhileChargingClick,
+                    modifier = Modifier.testTag("simulate_disconnect_while_charging_button")
+                ) {
+                    Text("Test Key Off", color = AmberWarning, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        // Needs Calibration & Offline Predicted Charging Banner (Visible when disconnected while charging)
+        if (isOfflinePred || needsCal) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(AmberWarning.copy(alpha = 0.14f))
+                    .border(1.dp, AmberWarning, RoundedCornerShape(12.dp))
+                    .padding(12.dp)
+                    .testTag("charging_needs_calibration_banner"),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "⚠️ STATUS: ${chargingMonitor.calibrationStatusLabel.uppercase()}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = AmberWarning,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = if (chargingAlertConfig.isEnabled) {
+                            "🔔 ${chargingAlertConfig.targetPct}% ${chargingAlertConfig.alertType.name} ARMED"
+                        } else {
+                            "Alert Off"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonMint
+                    )
+                }
+
+                Text(
+                    text = if (isOfflinePred) {
+                        "Scooter BLE disconnected while charging at ${chargingMonitor.disconnectStartBatteryPct ?: chargingMonitor.sessionStartBatteryPct ?: "--"}%. Battery % is automatically increasing every ${chargingMonitor.activeSecondsPerPct}s (+${chargingMonitor.chargingSpeedPctPerHour}%/hr) and your ${chargingAlertConfig.targetPct}% alarm will ring even with the scooter turned off. Reconnect BLE or calibrate below to sync with the scooter BMS."
+                    } else {
+                        "Charging continued while disconnected. Reconnect to your scooter via BLE to auto-calibrate with the hardware BMS, or calibrate the exact cluster % below."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextPrimary
+                )
+
+                // Calibration Controls
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Actual Scooter %: ${calibrateSliderSoc.roundToInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    Slider(
+                        value = calibrateSliderSoc,
+                        onValueChange = { calibrateSliderSoc = it },
+                        valueRange = 1f..100f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = AmberWarning,
+                            activeTrackColor = ElectricCyan
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("calibrate_offline_soc_slider")
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { onCalibrateOfflineBatterySoc(calibrateSliderSoc.roundToInt()) },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonMint),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("calibrate_offline_soc_button")
+                    ) {
+                        Text(
+                            text = "Calibrate to ${calibrateSliderSoc.roundToInt()}%",
+                            color = Color.Black,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    if (isOfflinePred) {
+                        OutlinedButton(
+                            onClick = onStopOfflinePredictedChargingClick,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("stop_offline_charging_button")
+                        ) {
+                            Text(
+                                text = "Unplug / Stop Offline",
+                                color = EnergeticCoral,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Live / Predicted SoC, Cluster Range (0x13), True Eco Range & Speed (+31.1%/hr = 115.7s/%)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1365,17 +1607,26 @@ private fun LiveChargingMonitorCard(
                     .background(SlateCardElevated)
                     .padding(10.dp)
             ) {
-                Text("LIVE SoC & GAIN", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                Text(
+                    text = if (isOfflinePred) "PREDICTED SoC" else "LIVE SoC & GAIN",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
                 Text(
                     text = "${chargingMonitor.currentBatteryPct ?: "--"}% (+${chargingMonitor.pctGainedThisSession}%)",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
-                    color = NeonMint
+                    color = if (isOfflinePred) AmberWarning else NeonMint,
+                    modifier = Modifier.testTag("charging_monitor_soc_value")
                 )
                 Text(
-                    text = "0x11 Mirror: ${telemetry.socMirror0x11 ?: "--"}%",
+                    text = if (isOfflinePred) {
+                        "Needs Calibration"
+                    } else {
+                        "0x11 Mirror: ${telemetry.socMirror0x11 ?: "--"}%"
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
+                    color = if (isOfflinePred) AmberWarning else TextSecondary
                 )
             }
 
@@ -1387,16 +1638,17 @@ private fun LiveChargingMonitorCard(
                     .padding(10.dp)
             ) {
                 Text("CLUSTER vs TRUE ECO", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                val dispCluster = telemetry.clusterRangeKm ?: chargingMonitor.clusterRangeKm
                 Text(
-                    text = "${telemetry.clusterRangeKm?.let { String.format(Locale.US, "%.1f", it) } ?: "--"} / ${trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.1f", it) } ?: "--"} km",
+                    text = "${dispCluster?.let { String.format(Locale.US, "%.1f", it) } ?: "--"} / ${trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.1f", it) } ?: "--"} km",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = ElectricCyan
                 )
                 Text(
-                    text = "0x13 B3..4 vs True Eco",
+                    text = "+${chargingMonitor.estimatedKwhAddedThisSession} kWh added",
                     style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
+                    color = NeonMint
                 )
             }
 
@@ -1480,6 +1732,88 @@ private fun LiveChargingMonitorCard(
                     color = TextSecondary
                 )
             }
+        }
+
+        // True Charging Time & Interval Analysis Insights (Just Like Trips Analysis)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SlateCardElevated)
+                .border(1.dp, ElectricCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                .padding(12.dp)
+                .testTag("true_charging_time_insights_card"),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "⚡ TRUE CHARGING TIME & INTERVAL ANALYSIS",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = ElectricCyan
+                )
+                Text(
+                    text = "${chargingMonitor.contributingSessionsCount} interval(s) • +${chargingMonitor.totalPctLearned}% learned",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NeonMint
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(SlateSurface)
+                        .padding(8.dp)
+                ) {
+                    Text("TRUE 0 → 80% (CC BULK)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    Text(
+                        text = formatDurationSeconds(chargingMonitor.true0To80TotalSeconds),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonMint
+                    )
+                    Text(
+                        text = "${chargingMonitor.learned0To80SecPerPct}s / +1% (Factory: 2h 45m)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(SlateSurface)
+                        .padding(8.dp)
+                ) {
+                    Text("TRUE 0 → 100% (CC + CV TAPER)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    Text(
+                        text = formatDurationSeconds(chargingMonitor.true0To100TotalSeconds),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    Text(
+                        text = "80–100% Taper: ${chargingMonitor.learned80To100SecPerPct}s / +1%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+
+            Text(
+                text = chargingMonitor.chargingInsightText,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextPrimary
+            )
         }
     }
 }

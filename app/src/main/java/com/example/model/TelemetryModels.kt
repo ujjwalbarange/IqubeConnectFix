@@ -1,6 +1,7 @@
 package com.example.model
 
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Target BLE Hardware & UUID Constants for TVS iQube (SmartXonnect BLE Cluster)
@@ -448,16 +449,27 @@ data class TelemetryState(
  * - Tier 1 Default 0-80% baseline: `123.75s per +1%` (`2h 45m` for `0-80%`)
  * - Tier 2 Historical sessions average (`savedChargingSessions`)
  * - Tier 3 Live `+1%` step timing (`115.7s per +1%` = `+31.1%/hr`)
+ * - Offline Predicted Continuation: Continues predicting SoC progression & firing target alarms
+ *   if BLE disconnects while charging, flagging `needsCalibration = true` until reconnected/calibrated.
  */
 data class ChargingMonitorState(
     val isCharging: Boolean = false,
+    val isDisconnectedPredicted: Boolean = false,
+    val needsCalibration: Boolean = false,
+    val calibrationStatusLabel: String = "Calibrated (Live BMS)",
+    val nextPercentProgressFraction: Float = 0f,
     val currentBatteryPct: Int? = null,
     val clusterRangeKm: Double? = null,
     val sessionStartBatteryPct: Int? = null,
+    val disconnectStartBatteryPct: Int? = null,
     val pctGainedThisSession: Int = 0,
     val activeSecondsPerPct: Double = IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT,
     val baselineSecondsPerPct: Double = IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT,
     val liveMeasuredSecondsPerPct: Double? = null,
+    val learned0To80SecPerPct: Double = IqubeBleSpec.DEFAULT_0_TO_80_SEC_PER_PCT,
+    val learned80To100SecPerPct: Double = IqubeBleSpec.DEFAULT_80_TO_100_SEC_PER_PCT,
+    val true0To80TotalSeconds: Long = 9900L,
+    val true0To100TotalSeconds: Long = 13500L,
     val chargingSpeedPctPerHour: Double = 29.1,
     val remainingSecondsTo80: Long? = null,
     val remainingSecondsTo100: Long? = null,
@@ -465,7 +477,11 @@ data class ChargingMonitorState(
     val baselineRemainingSecondsTo100: Long? = null,
     val predictionModeLabel: String = "Tier 1: Default Baseline (2h 45m 0–80% = 123.75s/%)",
     val isUsingLiveStepTiming: Boolean = false,
-    val completedStepsCount: Int = 0
+    val completedStepsCount: Int = 0,
+    val contributingSessionsCount: Int = 0,
+    val totalPctLearned: Int = 0,
+    val estimatedKwhAddedThisSession: Double = 0.0,
+    val chargingInsightText: String = "Default charging curve active (0–80% @ 123.8s/% • 80–100% @ 180.0s/%)"
 )
 
 data class SavedChargingSession(
@@ -476,7 +492,16 @@ data class SavedChargingSession(
     val endPct: Int,
     val pctGained: Int,
     val durationSeconds: Long,
-    val avgSecondsPerPct: Double
+    val avgSecondsPerPct: Double,
+    val cc0To80PctGained: Int = pctGained,
+    val cc0To80SecondsPerPct: Double = avgSecondsPerPct,
+    val cv80To100PctGained: Int = 0,
+    val cv80To100SecondsPerPct: Double = IqubeBleSpec.DEFAULT_80_TO_100_SEC_PER_PCT,
+    val estimatedKwhAdded: Double = ((pctGained * 0.0304) * 100.0).roundToInt() / 100.0,
+    val trueEcoRangeAddedKm: Double = pctGained * 1.0,
+    val wasOfflinePredicted: Boolean = false,
+    val calibrationDeltaPct: Int? = null,
+    val sessionSource: String = "Live BLE Charging"
 )
 
 enum class ChargingAlertType(val label: String) {
@@ -507,7 +532,9 @@ data class LastSeenScooterState(
     val latitude: Double = 21.0922,
     val longitude: Double = 79.0560,
     val wasCharging: Boolean,
-    val vehicleId: String
+    val vehicleId: String,
+    val needsCalibration: Boolean = false,
+    val isOfflinePredictedCharging: Boolean = false
 )
 
 /**

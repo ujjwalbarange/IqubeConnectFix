@@ -21,6 +21,7 @@ import com.example.model.NavigationManeuverState
 import com.example.model.PhoneStatusState
 import com.example.model.QueuedWriteCommand
 import com.example.model.RideMode
+import com.example.model.SavedChargingSession
 import com.example.model.SavedTripRecord
 import com.example.model.TelemetryState
 import com.example.model.TripSubcommandConfig
@@ -77,6 +78,7 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
     val phoneStatusState: StateFlow<PhoneStatusState> = bleManager.phoneStatusState
     val selectedRangeMode: StateFlow<RideMode> = bleManager.selectedRangeMode
     val savedTrips: StateFlow<List<SavedTripRecord>> = bleManager.tripRepository.savedTrips
+    val savedChargingSessions: StateFlow<List<SavedChargingSession>> = bleManager.tripRepository.savedChargingSessions
     val activeTripSession: StateFlow<ActiveTripSession?> = bleManager.activeTripSession
 
     // Cluster Location Display (`0x5B 0x5C` + 17-byte ASCII locality + `0xFF`)
@@ -222,9 +224,21 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
         bleManager.syncClockToClusterNow(isBackgroundHeartbeat = false)
     }
 
-    // Charging Predictor Actions
+    // Charging Predictor & Offline Predicted Charging / Calibration Actions
     fun simulateLiveOnePercentChargingStep() {
         bleManager.simulateLiveOnePercentChargingStep()
+    }
+
+    fun simulateDisconnectWhileCharging() {
+        bleManager.simulateDisconnectWhileCharging()
+    }
+
+    fun calibrateOfflineBatterySoc(actualSoc: Int) {
+        bleManager.calibrateOfflineBatterySoc(actualSoc)
+    }
+
+    fun stopOfflinePredictedCharging() {
+        bleManager.stopOfflinePredictedCharging()
     }
 
     fun setChargingAlertEnabled(enabled: Boolean) {
@@ -247,7 +261,7 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
         bleManager.setSelectedRangeMode(mode)
     }
 
-    // Saved Trips History & Export Actions
+    // Saved Trips & Charging Intervals History Actions
     fun logSampleVerifiedTrip() {
         bleManager.tripRepository.logSampleVerifiedTrip()
     }
@@ -258,6 +272,18 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
 
     fun clearAllSavedTrips() {
         bleManager.tripRepository.clearAllTrips()
+    }
+
+    fun logSampleChargingSession() {
+        bleManager.tripRepository.logSampleChargingSession()
+    }
+
+    fun deleteChargingSession(sessionId: String) {
+        bleManager.tripRepository.deleteChargingSession(sessionId)
+    }
+
+    fun clearAllChargingSessions() {
+        bleManager.tripRepository.clearAllChargingSessions()
     }
 
     fun exportSavedTripsCsv(): String {

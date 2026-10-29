@@ -122,7 +122,8 @@ class IqubeBleForegroundService : Service() {
                 bleManager.lastParkedLocation,
                 bleManager.trueRangeState,
                 bleManager.statusNotificationsEnabled,
-                bleManager.autoReconnectEnabled
+                bleManager.autoReconnectEnabled,
+                bleManager.chargingMonitorState
             ) { values ->
                 val phase = values[0] as BleConnectionPhase
                 val devName = values[1] as String
@@ -132,7 +133,8 @@ class IqubeBleForegroundService : Service() {
                 val trueRange = values[5] as com.example.model.TrueRangeCalculation
                 val notifEnabled = values[6] as Boolean
                 val autoReconnect = values[7] as Boolean
-                ForegroundStateSnapshot(phase, devName, tele, nav, parked, trueRange, notifEnabled, autoReconnect)
+                val charging = values[8] as com.example.model.ChargingMonitorState
+                ForegroundStateSnapshot(phase, devName, tele, nav, parked, trueRange, notifEnabled, autoReconnect, charging)
             }.collect { state ->
                 val isConnected = state.phase in listOf(
                     BleConnectionPhase.STREAMING_ACTIVE,
@@ -141,16 +143,18 @@ class IqubeBleForegroundService : Service() {
                 )
 
                 val currentBatPct = state.tele.batteryPercent
+                    ?: state.charging.currentBatteryPct
                     ?: state.parked?.batteryPercentAtPark
                     ?: bleManager.lastSeenState.value?.batteryPct
                     ?: 93
                 val currentRangeKm = (
                     state.tele.clusterRangeKm
+                        ?: state.charging.clusterRangeKm
                         ?: state.parked?.rangeKmAtPark
                         ?: bleManager.lastSeenState.value?.clusterRangeKm
                         ?: 98.0
                     ).roundToInt()
-                val isChargingNow = isConnected && state.tele.isCharging
+                val isChargingNow = (isConnected && state.tele.isCharging) || state.charging.isCharging
 
                 // Keep Quick Settings Control Center tile updated with latest battery % & range km
                 IqubeQuickSettingsTileService.requestTileUpdate(applicationContext)
@@ -158,8 +162,16 @@ class IqubeBleForegroundService : Service() {
                 if (!state.notifEnabled) {
                     updateNotification(
                         title = "iQube Cockpit",
-                        contentText = if (isConnected) "Connected in background" else "Background service running",
-                        subText = if (isConnected) "Connected" else "Idle",
+                        contentText = when {
+                            state.charging.isDisconnectedPredicted -> "Offline predicted charging ($currentBatPct%) • Needs Calibration"
+                            isConnected -> "Connected in background"
+                            else -> "Background service running"
+                        },
+                        subText = when {
+                            state.charging.needsCalibration -> "Needs Calibration"
+                            isConnected -> "Connected"
+                            else -> "Idle"
+                        },
                         isRiding = (state.tele.speedKmh ?: 0) > 0,
                         isConnected = isConnected,
                         batteryPct = currentBatPct,
@@ -177,10 +189,10 @@ class IqubeBleForegroundService : Service() {
                         val spd = state.tele.speedKmh?.let { "${it} km/h" } ?: "0 km/h"
 
                         if (state.tele.isCharging) {
-                            val charging = bleManager.chargingMonitorState.value
+                            val charging = state.charging
                             val to80 = charging.remainingSecondsTo80?.let {
-                                val m = (it / 60).coerceAtLeast(1)
-                                if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
+                                val m = (it / 60).coerceAtLeast(0)
+                                if (m == 0L) "Reached" else if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
                             } ?: "Estimating"
                             val to100 = charging.remainingSecondsTo100?.let {
                                 val m = (it / 60).coerceAtLeast(1)
@@ -219,41 +231,78 @@ class IqubeBleForegroundService : Service() {
                         updateNotification(
                             title = "Connecting to TVS iQube...",
                             contentText = "Scanning & linking ${state.devName} in background",
-                            subText = "Connecting",
+                            subText = if (state.charging.needsCalibration) "Needs Calibration" else "Connecting",
                             isRiding = false,
                             isConnected = false,
                             batteryPct = currentBatPct,
                             rangeKm = currentRangeKm,
-                            isCharging = false
+                            isCharging = isChargingNow
                         )
                     }
-                    BleConnectionPhase.DISCONNECTED -> {
-                        val lastSeenStr = state.parked?.timestampMs?.let {
-                            timeFormat.format(java.util.Date(it))
-                        } ?: "Recent"
-                        val bat = state.parked?.batteryPercentAtPark?.let { "$it%" } ?: state.tele.batteryPercent?.let { "$it%" } ?: "--%"
-                        val dte = state.parked?.rangeKmAtPark?.let { String.format(Locale.US, "%.0f km", it) } ?: state.tele.clusterRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
-                        val trueEco = state.trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
-                        val loc = state.parked?.locationName?.takeIf { it.isNotBlank() } ?: "Parked Location"
+                    BleConnectionPhase.DISCONNECTED,
+                    BleConnectionPhase.RECONNECTING_BACKOFF -> {
+                        if (state.charging.isDisconnectedPredicted || state.charging.isCharging) {
+                            val charging = state.charging
+                            val bat = "${charging.currentBatteryPct ?: currentBatPct}%"
+                            val trueEco = state.trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
+                            val to80 = charging.remainingSecondsTo80?.let {
+                                val m = (it / 60).coerceAtLeast(0)
+                                if (m == 0L) "Reached" else if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
+                            } ?: "Estimating"
+                            val to100 = charging.remainingSecondsTo100?.let {
+                                val m = (it / 60).coerceAtLeast(1)
+                                if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
+                            } ?: "Estimating"
 
-                        updateNotification(
-                            title = "TVS iQube Disconnected • Last seen $lastSeenStr",
-                            contentText = "Battery: $bat • Range: $dte (True: $trueEco) • 📍 $loc",
-                            subText = if (state.autoReconnect) "Scanning to reconnect..." else "Disconnected",
-                            isRiding = false,
-                            isConnected = false,
-                            batteryPct = currentBatPct,
-                            rangeKm = currentRangeKm,
-                            isCharging = false
-                        )
+                            updateNotification(
+                                title = "⚡ TVS iQube Charging (Predicted) • $bat",
+                                contentText = "True Range: $trueEco • To 80%: $to80 • Full: $to100 • ⚠️ Needs Calibration",
+                                subText = "Needs Calibration",
+                                isRiding = false,
+                                isConnected = false,
+                                batteryPct = currentBatPct,
+                                rangeKm = currentRangeKm,
+                                isCharging = true
+                            )
+                        } else {
+                            val lastSeenStr = state.parked?.timestampMs?.let {
+                                timeFormat.format(java.util.Date(it))
+                            } ?: "Recent"
+                            val bat = state.charging.currentBatteryPct?.let { "$it%" }
+                                ?: state.parked?.batteryPercentAtPark?.let { "$it%" }
+                                ?: state.tele.batteryPercent?.let { "$it%" }
+                                ?: "--%"
+                            val dte = state.parked?.rangeKmAtPark?.let { String.format(Locale.US, "%.0f km", it) }
+                                ?: state.tele.clusterRangeKm?.let { String.format(Locale.US, "%.0f km", it) }
+                                ?: "--"
+                            val trueEco = state.trueRange.trueEcoRangeKm?.let { String.format(Locale.US, "%.0f km", it) } ?: "--"
+                            val loc = state.parked?.locationName?.takeIf { it.isNotBlank() } ?: "Parked Location"
+                            val calSuffix = if (state.charging.needsCalibration) " • ⚠️ Needs Calibration" else ""
 
-                        if (!state.autoReconnect) {
-                            delay(4000L)
-                            if (bleManager.connectionPhase.value == BleConnectionPhase.DISCONNECTED &&
-                                !bleManager.autoReconnectEnabled.value
-                            ) {
-                                stopForeground(STOP_FOREGROUND_REMOVE)
-                                stopSelf()
+                            updateNotification(
+                                title = "TVS iQube Disconnected • Last seen $lastSeenStr",
+                                contentText = "Battery: $bat • Range: $dte (True: $trueEco) • 📍 $loc$calSuffix",
+                                subText = when {
+                                    state.charging.needsCalibration -> "Needs Calibration"
+                                    state.autoReconnect -> "Scanning to reconnect..."
+                                    else -> "Disconnected"
+                                },
+                                isRiding = false,
+                                isConnected = false,
+                                batteryPct = currentBatPct,
+                                rangeKm = currentRangeKm,
+                                isCharging = false
+                            )
+
+                            if (!state.autoReconnect && !state.charging.isDisconnectedPredicted && !state.charging.isCharging) {
+                                delay(4000L)
+                                if (bleManager.connectionPhase.value == BleConnectionPhase.DISCONNECTED &&
+                                    !bleManager.autoReconnectEnabled.value &&
+                                    !bleManager.chargingMonitorState.value.isCharging
+                                ) {
+                                    stopForeground(STOP_FOREGROUND_REMOVE)
+                                    stopSelf()
+                                }
                             }
                         }
                     }
@@ -266,7 +315,7 @@ class IqubeBleForegroundService : Service() {
                             isConnected = false,
                             batteryPct = currentBatPct,
                             rangeKm = currentRangeKm,
-                            isCharging = false
+                            isCharging = isChargingNow
                         )
                     }
                 }
@@ -437,5 +486,6 @@ private data class ForegroundStateSnapshot(
     val parked: com.example.model.LastParkedLocation?,
     val trueRange: com.example.model.TrueRangeCalculation,
     val notifEnabled: Boolean,
-    val autoReconnect: Boolean
+    val autoReconnect: Boolean,
+    val charging: com.example.model.ChargingMonitorState
 )

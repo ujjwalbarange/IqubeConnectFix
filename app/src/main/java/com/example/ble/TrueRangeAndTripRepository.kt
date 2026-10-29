@@ -168,10 +168,13 @@ class TrueRangeAndTripRepository(private val context: Context?) {
         }
 
         /**
-         * Pure, unit-testable 3-Tier Charging Time Predictor:
-         * - Tier 1: Default Baseline (`123.75s / 1%` = `2 hr 45 min` for `0–80%`, plus `115.7s / 1%` = `+31.1%/hr` verified capture reference)
-         * - Tier 2: Historical Charging Sessions average (`savedChargingSessions`)
-         * - Tier 3: Live Connected `+1%` Step Timing (`liveStepDurationsSec` measured during the active session)
+         * Pure, unit-testable 3-Tier Charging Time Predictor & Interval Analyzer:
+         * - Blends Previous Charging Intervals (`savedChargingSessions`, rolling window of up to 5 qualifying intervals)
+         *   with Current Charging Session (`liveStepDurationsSec`) to learn both:
+         *   1) `0–80%` Bulk (CC) Charging Rate (`learned0To80SecPerPct`, default `123.75s / 1%` = `2h 45m`)
+         *   2) `80–100%` Taper (CV) Charging Rate (`learned80To100SecPerPct`, default `180.0s / 1%` = `1h 00m`)
+         * - Supports Offline Predicted Charging when the scooter is turned off / disconnected while charging,
+         *   stepping battery `%` according to the predicted rate and flagging `needsCalibration = true`.
          */
         fun computeChargingMonitorState(
             isCharging: Boolean,
@@ -179,38 +182,125 @@ class TrueRangeAndTripRepository(private val context: Context?) {
             clusterRangeKm: Double?,
             sessionStartBatteryPct: Int?,
             liveStepDurationsSec: List<Double>,
-            savedChargingSessions: List<SavedChargingSession>
+            savedChargingSessions: List<SavedChargingSession>,
+            isDisconnectedPredicted: Boolean = false,
+            needsCalibration: Boolean = false,
+            calibrationStatusLabel: String = "Calibrated (Live BMS)",
+            nextPercentProgressFraction: Float = 0f,
+            disconnectStartBatteryPct: Int? = null
         ): ChargingMonitorState {
-            // Tier 1 & Tier 2: Compute Baseline (Default 123.75s/% for 2h45m 0-80%, or Historical Sessions average)
-            val qualifyingHistory = savedChargingSessions.filter { it.pctGained >= 1 && it.durationSeconds >= 60L }
-            val totalHistSec = qualifyingHistory.sumOf { it.durationSeconds }.toDouble()
-            val totalHistPct = qualifyingHistory.sumOf { it.pctGained }
+            // Rolling 5-Session window where pctGained >= 1 && durationSeconds >= 45
+            val qualifyingHistory = savedChargingSessions
+                .filter { it.pctGained >= 1 && it.durationSeconds >= 45L }
+                .take(5)
 
-            val baselineSecPerPct = if (totalHistPct >= 1 && totalHistSec > 0.0) {
-                (totalHistSec / totalHistPct.toDouble()).coerceIn(60.0, 240.0)
-            } else {
-                IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT // 123.75s per 1% (2h 45m for 0-80%)
+            var histCcPct = 0
+            var histCcSec = 0.0
+            var histCvPct = 0
+            var histCvSec = 0.0
+
+            for (session in qualifyingHistory) {
+                if (session.cc0To80PctGained > 0 || session.cv80To100PctGained > 0) {
+                    if (session.cc0To80PctGained > 0 && session.cc0To80SecondsPerPct > 0.0) {
+                        histCcPct += session.cc0To80PctGained
+                        histCcSec += session.cc0To80PctGained * session.cc0To80SecondsPerPct
+                    }
+                    if (session.cv80To100PctGained > 0 && session.cv80To100SecondsPerPct > 0.0) {
+                        histCvPct += session.cv80To100PctGained
+                        histCvSec += session.cv80To100PctGained * session.cv80To100SecondsPerPct
+                    }
+                } else {
+                    val start = session.startPct.coerceIn(0, 100)
+                    val end = session.endPct.coerceIn(start, 100)
+                    val ccGained = max(0, minOf(80, end) - minOf(80, start))
+                    val cvGained = max(0, end - max(80, start))
+                    if (ccGained > 0 && cvGained == 0) {
+                        histCcPct += ccGained
+                        histCcSec += session.durationSeconds.toDouble()
+                    } else if (cvGained > 0 && ccGained == 0) {
+                        histCvPct += cvGained
+                        histCvSec += session.durationSeconds.toDouble()
+                    } else if (ccGained + cvGained > 0) {
+                        // Split total duration proportionally to default 123.75 vs 180 weight
+                        val ccWeight = ccGained * IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT
+                        val cvWeight = cvGained * IqubeBleSpec.DEFAULT_80_TO_100_SEC_PER_PCT
+                        val totalWeight = (ccWeight + cvWeight).coerceAtLeast(1.0)
+                        histCcPct += ccGained
+                        histCcSec += session.durationSeconds * (ccWeight / totalWeight)
+                        histCvPct += cvGained
+                        histCvSec += session.durationSeconds * (cvWeight / totalWeight)
+                    }
+                }
             }
 
             // Tier 3: Live +1% Step Timing in current charging session
-            val validLiveSteps = liveStepDurationsSec.filter { it in 50.0..260.0 }
+            val validLiveSteps = liveStepDurationsSec.filter { it in 45.0..280.0 }
             val isLiveStepTimed = validLiveSteps.isNotEmpty()
             val liveMeasuredSecPerPct = if (isLiveStepTimed) {
                 (validLiveSteps.average() * 10.0).roundToInt() / 10.0
             } else null
 
-            val activeSecPerPct = liveMeasuredSecPerPct ?: baselineSecPerPct
+            // Blend current session's live steps into the appropriate CC (0-80%) or CV (80-100%) bucket
+            var liveCcPct = 0
+            var liveCcSec = 0.0
+            var liveCvPct = 0
+            var liveCvSec = 0.0
+            if (isLiveStepTimed) {
+                val startSoc = sessionStartBatteryPct ?: ((currentBatteryPct ?: 50) - validLiveSteps.size)
+                validLiveSteps.forEachIndexed { index, stepSec ->
+                    val stepTargetSoc = startSoc + index + 1
+                    if (stepTargetSoc <= 80) {
+                        liveCcPct += 1
+                        liveCcSec += stepSec
+                    } else {
+                        liveCvPct += 1
+                        liveCvSec += stepSec
+                    }
+                }
+            }
+
+            val totalCcPct = histCcPct + liveCcPct
+            val totalCcSec = histCcSec + liveCcSec
+            val totalCvPct = histCvPct + liveCvPct
+            val totalCvSec = histCvSec + liveCvSec
+
+            val isCcLearned = totalCcPct >= 1 && totalCcSec > 0.0
+            val isCvLearned = totalCvPct >= 1 && totalCvSec > 0.0
+
+            val learned0To80SecPerPct = if (isCcLearned) {
+                ((totalCcSec / totalCcPct.toDouble()).coerceIn(60.0, 240.0) * 10.0).roundToInt() / 10.0
+            } else {
+                IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT // 123.75s per 1% (2h 45m for 0-80%)
+            }
+
+            val learned80To100SecPerPct = if (isCvLearned) {
+                ((totalCvSec / totalCvPct.toDouble()).coerceIn(90.0, 300.0) * 10.0).roundToInt() / 10.0
+            } else {
+                IqubeBleSpec.DEFAULT_80_TO_100_SEC_PER_PCT // 180.0s per 1% (80->100%)
+            }
+
+            val baselineSecPerPct = if (histCcPct >= 1 && histCcSec > 0.0) {
+                (histCcSec / histCcPct.toDouble()).coerceIn(60.0, 240.0)
+            } else {
+                IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT
+            }
+
+            val currentInTaperPhase = (currentBatteryPct ?: 0) >= 80
+            val activeSecPerPct = when {
+                isLiveStepTimed && liveMeasuredSecPerPct != null -> liveMeasuredSecPerPct
+                currentInTaperPhase -> learned80To100SecPerPct
+                else -> learned0To80SecPerPct
+            }
+
             val pctPerHour = ((3600.0 / activeSecPerPct) * 10.0).roundToInt() / 10.0
 
-            val taperSecPerPct = IqubeBleSpec.DEFAULT_80_TO_100_SEC_PER_PCT // 180.0s per 1% (80->100%)
-
             val remSecTo80 = currentBatteryPct?.let { soc ->
-                (max(0, 80 - soc) * activeSecPerPct).roundToLong()
+                (max(0, 80 - soc) * learned0To80SecPerPct).roundToLong()
             }
             val remSecTo100 = currentBatteryPct?.let { soc ->
                 val pctTo80 = max(0, 80 - soc)
                 val pct80To100 = if (soc < 80) 20 else max(0, 100 - soc)
-                (pctTo80 * activeSecPerPct + pct80To100 * taperSecPerPct).roundToLong()
+                (pctTo80 * learned0To80SecPerPct + pct80To100 * learned80To100SecPerPct).roundToLong()
             }
 
             val baselineRemSecTo80 = currentBatteryPct?.let { soc ->
@@ -219,27 +309,80 @@ class TrueRangeAndTripRepository(private val context: Context?) {
             val baselineRemSecTo100 = currentBatteryPct?.let { soc ->
                 val pctTo80 = max(0, 80 - soc)
                 val pct80To100 = if (soc < 80) 20 else max(0, 100 - soc)
-                (pctTo80 * baselineSecPerPct + pct80To100 * taperSecPerPct).roundToLong()
+                (pctTo80 * baselineSecPerPct + pct80To100 * IqubeBleSpec.DEFAULT_80_TO_100_SEC_PER_PCT).roundToLong()
             }
+
+            val true0To80TotalSec = (80 * learned0To80SecPerPct).roundToLong()
+            val true0To100TotalSec = (80 * learned0To80SecPerPct + 20 * learned80To100SecPerPct).roundToLong()
 
             val pctGained = if (sessionStartBatteryPct != null && currentBatteryPct != null) {
                 max(0, currentBatteryPct - sessionStartBatteryPct)
             } else 0
 
+            // TVS iQube 3.04 kWh usable pack: ~0.0304 kWh per 1% SoC
+            val estimatedKwhAdded = ((pctGained * 0.0304) * 100.0).roundToInt() / 100.0
+            val totalLearnedPct = totalCcPct + totalCvPct
+            val contributingSessions = qualifyingHistory.size + (if (isLiveStepTimed) 1 else 0)
+
             val modeLabel = when {
+                isDisconnectedPredicted -> String.format(
+                    Locale.US,
+                    "Offline Predicted Charging (%.1fs/+1%% • +%.1f%%/hr) • Needs Calibration",
+                    activeSecPerPct,
+                    pctPerHour
+                )
+                isLiveStepTimed && qualifyingHistory.isNotEmpty() -> String.format(
+                    Locale.US,
+                    "Blended Live + %d Past Interval(s) (0–80%%: %.1fs/%% • 80–100%%: %.1fs/%%)",
+                    qualifyingHistory.size,
+                    learned0To80SecPerPct,
+                    learned80To100SecPerPct
+                )
                 isLiveStepTimed -> String.format(
                     Locale.US,
                     "Live 1%% Step Timing (%.1fs / +1%% • +%.1f%%/hr)",
                     activeSecPerPct,
                     pctPerHour
                 )
-                totalHistPct >= 1 -> String.format(
+                qualifyingHistory.isNotEmpty() -> String.format(
                     Locale.US,
-                    "Historical Session Baseline (%.1fs / +1%% from %d session(s))",
-                    baselineSecPerPct,
-                    qualifyingHistory.size
+                    "Learned from %d Interval(s) (0–80%%: %.1fs/%% • 80–100%%: %.1fs/%%)",
+                    qualifyingHistory.size,
+                    learned0To80SecPerPct,
+                    learned80To100SecPerPct
                 )
                 else -> "Default Baseline (2h 45m 0–80% = 123.8s/% • 80–100% = 180s/%)"
+            }
+
+            val true0To80Min = (true0To80TotalSec / 60.0).roundToInt()
+            val true0To100Min = (true0To100TotalSec / 60.0).roundToInt()
+            val speedDeltaPct = (((IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT - learned0To80SecPerPct) /
+                IqubeBleSpec.DEFAULT_CHARGING_SEC_PER_PCT) * 100.0).roundToInt()
+            val speedComparison = when {
+                speedDeltaPct >= 2 -> "${speedDeltaPct}% faster than 650W factory baseline"
+                speedDeltaPct <= -2 -> "${-speedDeltaPct}% slower than 650W factory baseline"
+                else -> "matching 650W factory curve"
+            }
+
+            val insightText = buildString {
+                append(
+                    String.format(
+                        Locale.US,
+                        "True 0→80%%: %dh %02dm (%.1fs/%%) • True 0→100%%: %dh %02dm (80–100%% taper %.1fs/%%) — %s.",
+                        true0To80Min / 60,
+                        true0To80Min % 60,
+                        learned0To80SecPerPct,
+                        true0To100Min / 60,
+                        true0To100Min % 60,
+                        learned80To100SecPerPct,
+                        speedComparison
+                    )
+                )
+                if (isDisconnectedPredicted || needsCalibration) {
+                    append(" Scooter BLE disconnected while charging: advancing SoC via learned curve (Needs Calibration on reconnect).")
+                } else if (contributingSessions > 0) {
+                    append(" Analyzed across $contributingSessions interval(s) (+$totalLearnedPct% total SoC learned).")
+                }
             }
 
             return ChargingMonitorState(
@@ -258,7 +401,20 @@ class TrueRangeAndTripRepository(private val context: Context?) {
                 baselineRemainingSecondsTo100 = baselineRemSecTo100,
                 predictionModeLabel = modeLabel,
                 isUsingLiveStepTiming = isLiveStepTimed,
-                completedStepsCount = validLiveSteps.size
+                completedStepsCount = validLiveSteps.size,
+                isDisconnectedPredicted = isDisconnectedPredicted,
+                needsCalibration = needsCalibration,
+                calibrationStatusLabel = calibrationStatusLabel,
+                nextPercentProgressFraction = nextPercentProgressFraction.coerceIn(0f, 1f),
+                disconnectStartBatteryPct = disconnectStartBatteryPct,
+                learned0To80SecPerPct = learned0To80SecPerPct,
+                learned80To100SecPerPct = learned80To100SecPerPct,
+                true0To80TotalSeconds = true0To80TotalSec,
+                true0To100TotalSeconds = true0To100TotalSec,
+                contributingSessionsCount = contributingSessions,
+                totalPctLearned = totalLearnedPct,
+                estimatedKwhAddedThisSession = estimatedKwhAdded,
+                chargingInsightText = insightText
             )
         }
     }
@@ -304,6 +460,61 @@ class TrueRangeAndTripRepository(private val context: Context?) {
         val updated = listOf(session) + _savedChargingSessions.value
         _savedChargingSessions.value = updated
         persistChargingSessionsToStorage(updated)
+    }
+
+    fun deleteChargingSession(sessionId: String) {
+        val updated = _savedChargingSessions.value.filterNot { it.id == sessionId }
+        _savedChargingSessions.value = updated
+        persistChargingSessionsToStorage(updated)
+    }
+
+    fun clearAllChargingSessions() {
+        _savedChargingSessions.value = emptyList()
+        persistChargingSessionsToStorage(emptyList())
+    }
+
+    /**
+     * Logs a sample verified charging interval (e.g., 38% -> 82% across CC bulk + CV taper)
+     * so users can immediately inspect Charging Interval Analysis & True Charging Time insights.
+     */
+    fun logSampleChargingSession(
+        startPct: Int = 38,
+        endPct: Int = 82,
+        ccSecPerPct: Double = 115.7,
+        cvSecPerPct: Double = 172.0,
+        wasOfflinePredicted: Boolean = false
+    ): SavedChargingSession {
+        val now = System.currentTimeMillis()
+        val gained = max(1, endPct - startPct)
+        val ccGained = max(0, minOf(80, endPct) - minOf(80, startPct))
+        val cvGained = max(0, endPct - max(80, startPct))
+        val durationSec = (ccGained * ccSecPerPct + cvGained * cvSecPerPct).roundToLong().coerceAtLeast(60L)
+        val avgSecPerPct = ((durationSec.toDouble() / gained.toDouble()) * 10.0).roundToInt() / 10.0
+        val kwhAdded = ((gained * 0.0304) * 100.0).roundToInt() / 100.0
+        val ecoKmPerPct = computeTrueRange(endPct, _savedTrips.value).ecoKmPerPct
+        val ecoRangeAdded = ((gained * ecoKmPerPct) * 10.0).roundToInt() / 10.0
+
+        val session = SavedChargingSession(
+            id = "chg_$now",
+            startTimeMs = now - durationSec * 1000L,
+            endTimeMs = now,
+            startPct = startPct,
+            endPct = endPct,
+            pctGained = gained,
+            durationSeconds = durationSec,
+            avgSecondsPerPct = avgSecPerPct,
+            cc0To80PctGained = ccGained,
+            cc0To80SecondsPerPct = if (ccGained > 0) ccSecPerPct else 0.0,
+            cv80To100PctGained = cvGained,
+            cv80To100SecondsPerPct = if (cvGained > 0) cvSecPerPct else 0.0,
+            estimatedKwhAdded = kwhAdded,
+            trueEcoRangeAddedKm = ecoRangeAdded,
+            wasOfflinePredicted = wasOfflinePredicted,
+            calibrationDeltaPct = 0,
+            sessionSource = if (wasOfflinePredicted) "Offline Predicted + Calibrated" else "Verified 650W Charger Session"
+        )
+        saveChargingSession(session)
+        return session
     }
 
     fun saveLastSeenState(state: LastSeenScooterState) {
@@ -563,16 +774,32 @@ class TrueRangeAndTripRepository(private val context: Context?) {
             val list = ArrayList<SavedChargingSession>(arr.length())
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
+                val startPct = obj.optInt("startPct", 38)
+                val endPct = obj.optInt("endPct", 42)
+                val pctGained = obj.optInt("pctGained", max(1, endPct - startPct))
+                val durationSec = obj.optLong("durationSeconds", 463L)
+                val avgSecPerPct = obj.optDouble("avgSecondsPerPct", 115.7)
+                val defaultCcGained = max(0, minOf(80, endPct) - minOf(80, startPct))
+                val defaultCvGained = max(0, endPct - max(80, startPct))
                 list.add(
                     SavedChargingSession(
                         id = obj.optString("id", "chg_$i"),
                         startTimeMs = obj.optLong("startTimeMs", 0L),
                         endTimeMs = obj.optLong("endTimeMs", 0L),
-                        startPct = obj.optInt("startPct", 38),
-                        endPct = obj.optInt("endPct", 42),
-                        pctGained = obj.optInt("pctGained", 4),
-                        durationSeconds = obj.optLong("durationSeconds", 463L),
-                        avgSecondsPerPct = obj.optDouble("avgSecondsPerPct", 115.7)
+                        startPct = startPct,
+                        endPct = endPct,
+                        pctGained = pctGained,
+                        durationSeconds = durationSec,
+                        avgSecondsPerPct = avgSecPerPct,
+                        cc0To80PctGained = obj.optInt("cc0To80PctGained", defaultCcGained),
+                        cc0To80SecondsPerPct = obj.optDouble("cc0To80SecondsPerPct", if (defaultCcGained > 0) avgSecPerPct else 0.0),
+                        cv80To100PctGained = obj.optInt("cv80To100PctGained", defaultCvGained),
+                        cv80To100SecondsPerPct = obj.optDouble("cv80To100SecondsPerPct", if (defaultCvGained > 0) avgSecPerPct else 0.0),
+                        estimatedKwhAdded = obj.optDouble("estimatedKwhAdded", ((pctGained * 0.0304) * 100.0).roundToInt() / 100.0),
+                        trueEcoRangeAddedKm = obj.optDouble("trueEcoRangeAddedKm", pctGained.toDouble()),
+                        wasOfflinePredicted = obj.optBoolean("wasOfflinePredicted", false),
+                        calibrationDeltaPct = obj.optInt("calibrationDeltaPct", 0),
+                        sessionSource = obj.optString("sessionSource", "Connected BLE Session")
                     )
                 )
             }
@@ -595,6 +822,15 @@ class TrueRangeAndTripRepository(private val context: Context?) {
                     put("pctGained", s.pctGained)
                     put("durationSeconds", s.durationSeconds)
                     put("avgSecondsPerPct", s.avgSecondsPerPct)
+                    put("cc0To80PctGained", s.cc0To80PctGained)
+                    put("cc0To80SecondsPerPct", s.cc0To80SecondsPerPct)
+                    put("cv80To100PctGained", s.cv80To100PctGained)
+                    put("cv80To100SecondsPerPct", s.cv80To100SecondsPerPct)
+                    put("estimatedKwhAdded", s.estimatedKwhAdded)
+                    put("trueEcoRangeAddedKm", s.trueEcoRangeAddedKm)
+                    put("wasOfflinePredicted", s.wasOfflinePredicted)
+                    put("calibrationDeltaPct", s.calibrationDeltaPct)
+                    put("sessionSource", s.sessionSource)
                 }
             )
         }
@@ -616,7 +852,9 @@ class TrueRangeAndTripRepository(private val context: Context?) {
                 latitude = obj.optDouble("latitude", 21.0922),
                 longitude = obj.optDouble("longitude", 79.0560),
                 wasCharging = obj.optBoolean("wasCharging", false),
-                vehicleId = obj.optString("vehicleId", IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT)
+                vehicleId = obj.optString("vehicleId", IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT),
+                needsCalibration = obj.optBoolean("needsCalibration", false),
+                isOfflinePredictedCharging = obj.optBoolean("isOfflinePredictedCharging", false)
             )
         } catch (_: Exception) {
             null
@@ -636,6 +874,8 @@ class TrueRangeAndTripRepository(private val context: Context?) {
             put("longitude", state.longitude)
             put("wasCharging", state.wasCharging)
             put("vehicleId", state.vehicleId)
+            put("needsCalibration", state.needsCalibration)
+            put("isOfflinePredictedCharging", state.isOfflinePredictedCharging)
         }
         prefs?.edit()?.putString(KEY_LAST_SEEN_STATE_JSON, obj.toString())?.apply()
     }

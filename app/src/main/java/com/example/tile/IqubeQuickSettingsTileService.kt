@@ -47,9 +47,10 @@ class IqubeQuickSettingsTileService : TileService() {
                 bleManager.connectionPhase,
                 bleManager.packetParser.telemetryState,
                 bleManager.lastSeenState,
-                bleManager.trueRangeState
-            ) { phase, tele, lastSeen, trueRange ->
-                TileSnapshot(phase, tele, lastSeen, trueRange)
+                bleManager.trueRangeState,
+                bleManager.chargingMonitorState
+            ) { phase, tele, lastSeen, trueRange, charging ->
+                TileSnapshot(phase, tele, lastSeen, trueRange, charging)
             }.collect { snapshot ->
                 renderTile(snapshot)
             }
@@ -81,12 +82,23 @@ class IqubeQuickSettingsTileService : TileService() {
         val tele = snapshot.tele
         val lastSeen = snapshot.lastSeen
         val trueRange = snapshot.trueRange
+        val charging = snapshot.charging
 
-        val batteryPct = (tele.batteryPercent ?: lastSeen?.batteryPct ?: 93).coerceIn(0, 100)
-        val clusterRangeKm = (tele.clusterRangeKm ?: lastSeen?.clusterRangeKm ?: 98.0).coerceAtLeast(0.0)
+        val batteryPct = (
+            tele.batteryPercent
+                ?: charging.currentBatteryPct
+                ?: lastSeen?.batteryPct
+                ?: 93
+            ).coerceIn(0, 100)
+        val clusterRangeKm = (
+            tele.clusterRangeKm
+                ?: charging.clusterRangeKm
+                ?: lastSeen?.clusterRangeKm
+                ?: 98.0
+            ).coerceAtLeast(0.0)
         val roundedRangeKm = clusterRangeKm.roundToInt()
         val trueEcoKm = trueRange.trueEcoRangeKm ?: (batteryPct * trueRange.ecoKmPerPct)
-        val isCharging = isConnected && tele.isCharging
+        val isCharging = (isConnected && tele.isCharging) || charging.isCharging
 
         // Render 2-line dynamic bitmap icon ("98%" on top, "103km" on bottom) like the network speed tile
         val bitmapIcon = createBatteryRangeTileBitmap(
@@ -97,6 +109,13 @@ class IqubeQuickSettingsTileService : TileService() {
         tile.icon = Icon.createWithBitmap(bitmapIcon)
 
         when {
+            charging.isDisconnectedPredicted -> {
+                tile.state = Tile.STATE_ACTIVE
+                tile.label = "⚡ $batteryPct% • $roundedRangeKm km"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    tile.subtitle = "Needs Calibration"
+                }
+            }
             isCharging -> {
                 tile.state = Tile.STATE_ACTIVE
                 tile.label = "⚡ $batteryPct% • $roundedRangeKm km"
@@ -120,7 +139,7 @@ class IqubeQuickSettingsTileService : TileService() {
                 tile.state = Tile.STATE_ACTIVE
                 tile.label = "$batteryPct% • $roundedRangeKm km"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Connecting..."
+                    tile.subtitle = if (charging.needsCalibration) "Needs Calibration" else "Connecting..."
                 }
             }
             else -> {
@@ -129,7 +148,11 @@ class IqubeQuickSettingsTileService : TileService() {
                 tile.label = "$batteryPct% • $roundedRangeKm km"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val loc = lastSeen?.locationName?.takeIf { it.isNotBlank() } ?: "Parked"
-                    tile.subtitle = String.format(Locale.US, "True: %.0f km • %s", trueEcoKm, loc)
+                    tile.subtitle = if (charging.needsCalibration) {
+                        "Needs Calibration"
+                    } else {
+                        String.format(Locale.US, "True: %.0f km • %s", trueEcoKm, loc)
+                    }
                 }
             }
         }
@@ -234,5 +257,6 @@ private data class TileSnapshot(
     val phase: BleConnectionPhase,
     val tele: com.example.model.TelemetryState,
     val lastSeen: com.example.model.LastSeenScooterState?,
-    val trueRange: com.example.model.TrueRangeCalculation
+    val trueRange: com.example.model.TrueRangeCalculation,
+    val charging: com.example.model.ChargingMonitorState
 )

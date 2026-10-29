@@ -159,7 +159,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
 
     companion object {
         const val GOOGLE_MAPS_PACKAGE = "com.google.android.apps.maps"
-        const val COUNTDOWN_THROTTLE_MS = 3_000L
+        const val COUNTDOWN_THROTTLE_MS = 1_000L
 
         private val dispatchScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -208,9 +208,9 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             "saved places"
         )
 
-        // Absolute clock time regex (e.g. "10:45 PM", "9:30 am", "14:20", "ETA 10:45", "Arrive 10:45")
+        // Absolute clock time regex (e.g. "10:45 PM", "9:30 am", "14:20", "20:19 ETA", "14:44 ETA", "ETA 10:45", "2019 ETA")
         private val CLOCK_TIME_REGEX = Regex(
-            pattern = """(?i)\b(?:eta|arrive|arrival|by)?\s*\d{1,2}:\d{2}(?:\s*(?:am|pm|a\.m\.|p\.m\.))?\b"""
+            pattern = """(?i)\b(?:(?:eta|arrive|arrival|by)\s*)?\d{1,2}:\d{2}(?:\s*(?:am|pm|a\.m\.|p\.m\.))?(?:\s*eta)?\b|\b\d{3,4}\s*eta\b"""
         )
 
         // Distance unit regex for next-turn extraction (supports "." and "," decimal separators)
@@ -274,7 +274,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             "re-center",
             "overview",
             "preview",
-            "steps"
+            "steps",
+            "now"
         )
 
         private fun isIgnoredUiLabel(text: String): Boolean {
@@ -305,33 +306,13 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val candidateBitmaps = mutableListOf<Bitmap>()
 
             if (extras != null) {
-                for (key in extras.keySet()) {
+                // Only inspect explicit large icon extras for maneuver graphics (never EXTRA_SMALL_ICON or action icons)
+                listOf(Notification.EXTRA_LARGE_ICON_BIG, Notification.EXTRA_LARGE_ICON).forEach { largeKey ->
                     runCatching {
-                        // Never inspect EXTRA_SMALL_ICON for turn direction (it is the static Maps app icon)
-                        if (key == Notification.EXTRA_SMALL_ICON) return@runCatching
-                        when (val value = extras.get(key)) {
-                            is CharSequence -> {
-                                val s = value.toString().replace('\u00A0', ' ').trim()
-                                if (!isIgnoredUiLabel(s) && !allExtraStrings.contains(s)) {
-                                    allExtraStrings.add(s)
-                                }
-                            }
-                            is Array<*> -> {
-                                value.forEach { item ->
-                                    if (item is CharSequence) {
-                                        val s = item.toString().replace('\u00A0', ' ').trim()
-                                        if (!isIgnoredUiLabel(s) && !allExtraStrings.contains(s)) {
-                                            allExtraStrings.add(s)
-                                        }
-                                    }
-                                }
-                            }
-                            is Icon -> {
-                                if (!candidateIcons.contains(value)) candidateIcons.add(value)
-                            }
-                            is Bitmap -> {
-                                if (!candidateBitmaps.contains(value)) candidateBitmaps.add(value)
-                            }
+                        @Suppress("DEPRECATION")
+                        when (val v = extras.get(largeKey)) {
+                            is Icon -> if (!candidateIcons.contains(v)) candidateIcons.add(v)
+                            is Bitmap -> if (!candidateBitmaps.contains(v)) candidateBitmaps.add(v)
                         }
                     }
                 }
@@ -348,7 +329,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     if (!candidateBitmaps.contains(bmp)) candidateBitmaps.add(0, bmp)
                 }
 
-                // Extract strings, TalkBack contentDescriptions, Icons, and Bitmaps from custom RemoteViews
+                // Extract TalkBack contentDescriptions and maneuver Icons/Bitmaps from custom RemoteViews
                 val remoteViewsList = listOfNotNull(
                     notification.bigContentView,
                     notification.contentView,
@@ -361,49 +342,40 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                             allExtraStrings.add(s)
                         }
                     }
-                    val (rvIcons, rvBitmaps) = extractIconsAndBitmapsFromRemoteViews(rv, context)
-                    for (ic in rvIcons) {
-                        if (!candidateIcons.contains(ic)) candidateIcons.add(ic)
-                    }
-                    for (bmp in rvBitmaps) {
-                        if (!candidateBitmaps.contains(bmp)) candidateBitmaps.add(bmp)
+                    if (candidateIcons.isEmpty() && candidateBitmaps.isEmpty()) {
+                        val (rvIcons, rvBitmaps) = extractIconsAndBitmapsFromRemoteViews(rv, context)
+                        for (ic in rvIcons) {
+                            if (!candidateIcons.contains(ic)) candidateIcons.add(ic)
+                        }
+                        for (bmp in rvBitmaps) {
+                            if (!candidateBitmaps.contains(bmp)) candidateBitmaps.add(bmp)
+                        }
                     }
                 }
             }
 
-            var iconResName: String? = null
             var iconShapeDir: TurnTypeConstant? = null
+            var primaryLargeBitmap: Bitmap? = candidateBitmaps.firstOrNull()
 
             if (context != null) {
-                // 1. Check resource names on candidate maneuver icons
+                // Rasterize candidateIcons to Bitmap and classify by pixel distribution (never rely on static Android resource IDs/names)
                 for (icon in candidateIcons) {
-                    val resName = resolveIconResourceName(context, icon)
-                    if (!resName.isNullOrBlank()) {
-                        if (iconResName == null) iconResName = resName
-                        if (parseDirectionFromIconResourceName(resName) != null) {
-                            iconResName = resName
-                            break
-                        }
-                    }
-                }
-
-                val resTurn = parseDirectionFromIconResourceName(iconResName)
-                if (resTurn == null) {
-                    // 2. Classify maneuver bitmap / icon pixel geometry
-                    for (icon in candidateIcons) {
-                        val dir = classifyArrowFromIcon(context, icon)
+                    val bmp = rasterizeIconToBitmap(context, icon)
+                    if (bmp != null) {
+                        if (primaryLargeBitmap == null) primaryLargeBitmap = bmp
+                        val dir = classifyManeuverBitmap(bmp)
                         if (dir != null) {
                             iconShapeDir = dir
                             break
                         }
                     }
-                    if (iconShapeDir == null) {
-                        for (bmp in candidateBitmaps) {
-                            val dir = classifyManeuverBitmap(bmp)
-                            if (dir != null) {
-                                iconShapeDir = dir
-                                break
-                            }
+                }
+                if (iconShapeDir == null) {
+                    for (bmp in candidateBitmaps) {
+                        val dir = classifyManeuverBitmap(bmp)
+                        if (dir != null) {
+                            iconShapeDir = dir
+                            break
                         }
                     }
                 }
@@ -424,10 +396,30 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 bigText = bigText,
                 tickerText = tickerText,
                 allExtraStrings = allExtraStrings,
-                iconResourceName = iconResName,
+                iconResourceName = null, // Do not use static Android resource IDs/names on live notifications
                 iconShapeDirection = iconShapeDir,
-                largeIconBitmap = candidateBitmaps.firstOrNull()
+                largeIconBitmap = primaryLargeBitmap
             )
+        }
+
+        internal fun rasterizeIconToBitmap(context: Context, icon: Icon?): Bitmap? {
+            if (icon == null) return null
+            return runCatching {
+                val remoteContext = runCatching {
+                    context.createPackageContext(GOOGLE_MAPS_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
+                }.getOrNull() ?: context
+
+                val drawable = icon.loadDrawable(remoteContext)
+                    ?: icon.loadDrawable(context)
+                    ?: return null
+
+                val size = 64
+                val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+                drawable.setBounds(0, 0, size, size)
+                drawable.draw(canvas)
+                bitmap
+            }.getOrNull()
         }
 
         internal fun extractStringsFromRemoteViews(
@@ -436,9 +428,9 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
         ): List<String> {
             if (rv == null) return emptyList()
             val contentDescriptions = mutableListOf<String>()
-            val otherStrings = mutableListOf<String>()
+            val subCueStrings = mutableListOf<String>()
 
-            // 1. Try inflating the RemoteViews to inspect actual View contentDescriptions (TalkBack maneuver labels) and TextView texts
+            // 1. Try inflating the RemoteViews to inspect View contentDescriptions (TalkBack maneuver labels)
             if (context != null) {
                 runCatching {
                     val remoteContext = runCatching {
@@ -456,8 +448,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                         }
                         if (view is android.widget.TextView) {
                             val t = view.text?.toString()?.replace('\u00A0', ' ')?.trim().orEmpty()
-                            if (!isIgnoredUiLabel(t) && !otherStrings.contains(t)) {
-                                otherStrings.add(t)
+                            if (t.contains("Then ", ignoreCase = true) || t.contains("↱") || t.contains("↰")) {
+                                if (!subCueStrings.contains(t)) subCueStrings.add(t)
                             }
                         }
                         if (view is android.view.ViewGroup) {
@@ -469,7 +461,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 }
             }
 
-            // 2. Walk mActions and ALL superclasses (e.g., BaseReflectionAction.value for setContentDescription / setText)
+            // 2. Walk mActions and ALL superclasses for setContentDescription or explicit "Then ↱/↰" sub-cues
             runCatching {
                 var rvClass: Class<*>? = rv.javaClass
                 var actions: List<*>? = null
@@ -506,15 +498,14 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     for (s in actionStrings) {
                         if (methodName.equals("setContentDescription", ignoreCase = true)) {
                             if (!contentDescriptions.contains(s)) contentDescriptions.add(s)
-                        } else {
-                            if (!otherStrings.contains(s)) otherStrings.add(s)
+                        } else if (s.contains("Then ", ignoreCase = true) || s.contains("↱") || s.contains("↰")) {
+                            if (!subCueStrings.contains(s)) subCueStrings.add(s)
                         }
                     }
                 }
             }
 
-            // Put contentDescriptions FIRST because Google Maps sets the exact turn instruction on the maneuver ImageView's contentDescription
-            return (contentDescriptions + otherStrings).distinct()
+            return (contentDescriptions + subCueStrings).distinct()
         }
 
         internal fun extractIconsAndBitmapsFromRemoteViews(
@@ -683,14 +674,19 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     Bitmap.createScaledBitmap(sourceBitmap, size, size, true)
                 }
 
-                // 1. Identify foreground maneuver arrow pixels (prefer bright white arrow pixels so any dark/colored notification circle is ignored)
+                // 1. Identify foreground maneuver arrow pixels
+                // Also track semi-transparent pixels (alpha > 45) for roundabout rings and fork branches
                 var whiteCount = 0
                 var opaqueCount = 0
+                var cornerOpaqueCount = 0
                 for (y in 0 until size) {
                     for (x in 0 until size) {
                         val px = bitmap.getPixel(x, y)
                         val a = (px ushr 24) and 0xFF
-                        if (a > 70) {
+                        if ((x < 4 || x >= size - 4) && (y < 4 || y >= size - 4) && a > 50) {
+                            cornerOpaqueCount++
+                        }
+                        if (a > 60) {
                             opaqueCount++
                             val r = (px ushr 16) and 0xFF
                             val g = (px ushr 8) and 0xFF
@@ -702,8 +698,10 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     }
                 }
 
+                val hasTransparentBackground = cornerOpaqueCount <= 4
                 val useWhiteMask = whiteCount in 14..(size * size * 3 / 4)
                 val fg = Array(size) { BooleanArray(size) }
+                val fullFg = Array(size) { BooleanArray(size) }
                 var minX = size
                 var maxX = -1
                 var minY = size
@@ -720,7 +718,15 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                         val isFg = if (useWhiteMask) {
                             a > 110 && r > 170 && g > 170 && b > 170
                         } else {
-                            a > 70
+                            a > 60
+                        }
+                        val isFullFg = if (hasTransparentBackground) {
+                            a > 45 && (r + g + b) > 120
+                        } else {
+                            isFg
+                        }
+                        if (isFullFg) {
+                            fullFg[y][x] = true
                         }
                         if (isFg) {
                             fg[y][x] = true
@@ -735,15 +741,19 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
 
                 val bw = maxX - minX + 1
                 val bh = maxY - minY + 1
-                if (fgCount < 14 || bw < 6 || bh < 6) return null
+                if (fgCount < 14 || bw < 6 || bh < 6) return TurnTypeConstant.CONTINUE_STRAIGHT
 
                 // 2. Compute normalized bounding-box statistics (nx, ny in [0.0, 1.0])
                 var topSumX = 0f
                 var topCount = 0
                 var veryTopSumX = 0f
                 var veryTopCount = 0
+                var midSumX = 0f
+                var midCount = 0
                 var bottomSumX = 0f
                 var bottomCount = 0
+                var stemBottomSumX = 0f
+                var stemBottomCount = 0
 
                 var topLeft = 0
                 var topRight = 0
@@ -785,10 +795,18 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                             topCount++
                             if (nx < 0.50f) topLeft++ else topRight++
                         }
+                        if (ny in 0.35f..0.68f) {
+                            midSumX += nx
+                            midCount++
+                        }
                         if (ny >= 0.54f) {
                             bottomSumX += nx
                             bottomCount++
                             if (nx < 0.50f) bottomLeft++ else bottomRight++
+                        }
+                        if (ny >= 0.72f) {
+                            stemBottomSumX += nx
+                            stemBottomCount++
                         }
                         if (nx <= 0.22f) {
                             leftEdgeSumY += ny
@@ -801,24 +819,26 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     }
                 }
 
-                if (topCount == 0 || bottomCount == 0) return null
+                if (topCount == 0 || bottomCount == 0) return TurnTypeConstant.CONTINUE_STRAIGHT
 
                 val topMeanX = topSumX / topCount
                 val veryTopMeanX = if (veryTopCount > 0) veryTopSumX / veryTopCount else topMeanX
+                val midMeanX = if (midCount > 0) midSumX / midCount else topMeanX
                 val bottomMeanX = bottomSumX / bottomCount
+                val stemBottomMeanX = if (stemBottomCount > 0) stemBottomSumX / stemBottomCount else bottomMeanX
                 val leftEdgeMeanY = if (leftEdgeCount > 0) leftEdgeSumY / leftEdgeCount else 0.5f
                 val rightEdgeMeanY = if (rightEdgeCount > 0) rightEdgeSumY / rightEdgeCount else 0.5f
                 val topCapDensity = if (topCapTotal > 0) topCapHits.toFloat() / topCapTotal else 0f
                 val centerCoreDensity = if (centerCoreTotal > 0) centerCoreHits.toFloat() / centerCoreTotal else 0f
 
-                // 3. Count separated horizontal foreground runs per scanline in upper-mid (0.20..0.54) and lower (0.54..0.86)
+                // 3. Count separated horizontal foreground runs per scanline
                 val minGapPx = (bw / 11).coerceAtLeast(2)
-                fun countRunsInRow(y: Int): Int {
+                fun countRunsInRow(mask: Array<BooleanArray>, y: Int, xStart: Int = minX, xEnd: Int = maxX): Int {
                     var runs = 0
                     var inRun = false
                     var gap = 0
-                    for (x in minX..maxX) {
-                        if (fg[y][x]) {
+                    for (x in xStart..xEnd) {
+                        if (mask[y][x]) {
                             if (!inRun) {
                                 if (runs == 0 || gap >= minGapPx) {
                                     runs++
@@ -838,87 +858,148 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
 
                 var midRows = 0
                 var midTwoRunRows = 0
+                var circleMidRows = 0
+                var circleMidTwoRunRows = 0
+                var rightLoopRows = 0
+                var rightLoopTwoRunRows = 0
+                var leftLoopRows = 0
+                var leftLoopTwoRunRows = 0
                 var bottomRows = 0
                 var bottomTwoRunRows = 0
+                var veryBottomRows = 0
+                var veryBottomTwoRunRows = 0
+
+                val rightLoopStartX = (minX + (bw * 0.48f).toInt()).coerceIn(0, size - 1)
+                val leftLoopEndX = (maxX - (bw * 0.48f).toInt()).coerceIn(0, size - 1)
 
                 for (y in minY..maxY) {
                     val ny = (y - minY).toFloat() / (bh - 1).coerceAtLeast(1)
-                    val runs = countRunsInRow(y)
+                    val runs = countRunsInRow(fg, y)
+                    val fullRuns = countRunsInRow(fullFg, y, 0, size - 1)
                     if (ny in 0.20f..0.54f) {
                         midRows++
                         if (runs >= 2) midTwoRunRows++
-                    } else if (ny in 0.54f..0.86f) {
+                    }
+                    if (ny in 0.34f..0.72f) {
+                        circleMidRows++
+                        if (fullRuns >= 2 || runs >= 2) circleMidTwoRunRows++
+                    }
+                    if (ny in 0.22f..0.68f) {
+                        rightLoopRows++
+                        if (countRunsInRow(fullFg, y, rightLoopStartX, size - 1) >= 2) {
+                            rightLoopTwoRunRows++
+                        }
+                        leftLoopRows++
+                        if (countRunsInRow(fullFg, y, 0, leftLoopEndX) >= 2) {
+                            leftLoopTwoRunRows++
+                        }
+                    }
+                    if (ny in 0.54f..0.86f) {
                         bottomRows++
                         if (runs >= 2) bottomTwoRunRows++
+                    }
+                    if (ny in 0.78f..1.00f) {
+                        veryBottomRows++
+                        if (runs >= 2) veryBottomTwoRunRows++
                     }
                 }
 
                 val midTwoRunRatio = if (midRows > 0) midTwoRunRows.toFloat() / midRows else 0f
+                val circleMidTwoRunRatio = if (circleMidRows > 0) circleMidTwoRunRows.toFloat() / circleMidRows else 0f
+                val rightLoopTwoRunRatio = if (rightLoopRows > 0) rightLoopTwoRunRows.toFloat() / rightLoopRows else 0f
+                val leftLoopTwoRunRatio = if (leftLoopRows > 0) leftLoopTwoRunRows.toFloat() / leftLoopRows else 0f
                 val bottomTwoRunRatio = if (bottomRows > 0) bottomTwoRunRows.toFloat() / bottomRows else 0f
+                val veryBottomTwoRunRatio = if (veryBottomRows > 0) veryBottomTwoRunRows.toFloat() / veryBottomRows else 0f
 
                 val bottomHasTwoSides = bottomLeft >= (bottomCount * 0.16f) && bottomRight >= (bottomCount * 0.16f)
                 val hasUpperHollowLoop = centerCoreDensity < 0.26f && midTwoRunRatio >= 0.22f && topCapDensity >= 0.14f
 
-                // Rule 1: U-Turn (`↶`/`↷`) & Roundabout U-Turn (as in Screenshot_20261029-001507: hollow circle/arch at top + 2 separated stems at bottom)
-                if (hasUpperHollowLoop && bottomTwoRunRatio >= 0.18f && bottomHasTwoSides) {
-                    // Check if a roundabout has a strong lateral upper exit arm vs exiting straight down (U-turn)
-                    return when {
-                        topMeanX in 0.39f..0.61f -> TurnTypeConstant.U_TURN
-                        topMeanX < 0.39f -> TurnTypeConstant.ROUNDABOUT_LEFT
-                        else -> TurnTypeConstant.ROUNDABOUT
-                    }
+                // Rule 1: U-Turn (`↶`/`↷`) & Roundabout U-Turn (Screenshot_20261029-201804 & 001507:
+                // top arch/loop + two parallel vertical legs in the middle and lower sections).
+                // Always map to U_TURN (never misclassify a U-turn as ROUNDABOUT_LEFT / Exit 5!).
+                if (hasUpperHollowLoop && bottomTwoRunRatio >= 0.16f && bottomHasTwoSides) {
+                    return TurnTypeConstant.U_TURN
                 }
-
-                // Also catch standard U-turn where the arch is at the top, center core is hollow, and two parallel legs run down the middle & bottom
-                if (centerCoreDensity < 0.28f && topCapDensity >= 0.16f && topMeanX in 0.38f..0.62f && midTwoRunRatio >= 0.30f && bottomTwoRunRatio >= 0.20f) {
+                if (centerCoreDensity < 0.28f && topCapDensity >= 0.14f && midTwoRunRatio >= 0.28f && bottomTwoRunRatio >= 0.18f) {
                     return TurnTypeConstant.U_TURN
                 }
 
-                // Rule 2: Sharp Right (`↘`) & Sharp Left (`↙`) (vertical stem + downward-pointing diagonal arm in lower half)
-                if (bottomTwoRunRatio >= 0.20f && bottomHasTwoSides && !hasUpperHollowLoop) {
-                    if (rightEdgeCount > leftEdgeCount && rightEdgeMeanY >= 0.50f && topMeanX < 0.52f) {
+                // Rule 2: Roundabout Straight (Screenshot_20261029-201708: single bottom entry stem + middle roundabout loop + top straight-up arrow)
+                // The top arrow tip and bottom entry stem are vertically aligned (`abs(veryTopMeanX - stemBottomMeanX) <= 0.15f`),
+                // while the middle bulges around the roundabout island (`abs(midMeanX - stemBottomMeanX) >= 0.10f` or `circleMidTwoRunRatio >= 0.26f`).
+                val isSingleBottomStem = veryBottomTwoRunRatio < 0.16f
+                if (
+                    isSingleBottomStem &&
+                    kotlin.math.abs(veryTopMeanX - stemBottomMeanX) <= 0.15f &&
+                    (kotlin.math.abs(midMeanX - stemBottomMeanX) >= 0.10f || (circleMidTwoRunRatio >= 0.26f && centerCoreDensity < 0.35f))
+                ) {
+                    return TurnTypeConstant.ROUNDABOUT
+                }
+
+                // Rule 3: Sharp Right (`↘`) & Sharp Left (`↙`)
+                // Require the bottom vertical stem AND the top apex to both be on the opposite side of the downward diagonal blade,
+                // so a 90° Right Turn (`↱`, where stemBottomMeanX < 0.45f) can NEVER be misclassified as Sharp Left (`↙`)!
+                if (bottomTwoRunRatio >= 0.22f && bottomHasTwoSides && !hasUpperHollowLoop) {
+                    if (
+                        stemBottomMeanX < 0.40f &&
+                        veryTopMeanX < 0.42f &&
+                        rightEdgeCount > leftEdgeCount &&
+                        rightEdgeMeanY >= 0.56f
+                    ) {
                         return TurnTypeConstant.TURN_SHARPLY_RIGHT
                     }
-                    if (leftEdgeCount > rightEdgeCount && leftEdgeMeanY >= 0.50f && topMeanX > 0.48f) {
+                    if (
+                        stemBottomMeanX > 0.60f &&
+                        veryTopMeanX > 0.58f &&
+                        leftEdgeCount > rightEdgeCount &&
+                        leftEdgeMeanY >= 0.56f
+                    ) {
                         return TurnTypeConstant.TURN_SHARPLY_LEFT
                     }
                 }
 
-                // Rule 3: 90° Turn Right (`↱`) & Slight Right (`↗`)
-                // In a right turn, the upper arm/arrowhead shifts right relative to the bottom vertical stem (`topMeanX > bottomMeanX`)
-                val dx = topMeanX - bottomMeanX
-                val isStemLeftTipRight = dx > 0.08f && bottomMeanX < 0.49f && rightEdgeCount > 0 && rightEdgeMeanY < 0.58f
-                val isUpperHeavyRight = topRight > topLeft * 1.22f && topMeanX > 0.52f && bottomRight < bottomLeft * 1.15f
+                // Rule 4: 90° Turn Right (`↱`), Roundabout Right, & Slight Right (`↗`)
+                // Active pixels in the upper arm/arrowhead shift RIGHT relative to the bottom vertical stem (`dx > 0.08f`).
+                val dx = topMeanX - stemBottomMeanX
+                val veryTopDx = veryTopMeanX - stemBottomMeanX
+                val isStemLeftTipRight = dx > 0.08f && veryTopDx > 0.05f && stemBottomMeanX < 0.52f && rightEdgeCount > 0 && rightEdgeMeanY < 0.62f
+                val isUpperHeavyRight = topRight > topLeft * 1.22f && topMeanX > 0.53f && stemBottomMeanX <= 0.54f && veryTopDx > 0.04f
 
                 if (isStemLeftTipRight || isUpperHeavyRight) {
-                    return if (veryTopMeanX > 0.66f && rightEdgeMeanY < 0.18f && bottomMeanX < 0.38f) {
+                    if (isSingleBottomStem && stemBottomMeanX > 0.20f && leftLoopTwoRunRatio >= 0.24f) {
+                        return TurnTypeConstant.ROUNDABOUT
+                    }
+                    return if (veryTopMeanX > 0.66f && rightEdgeMeanY < 0.18f && stemBottomMeanX < 0.38f) {
                         TurnTypeConstant.TURN_SLIGHTLY_RIGHT
                     } else {
                         TurnTypeConstant.TURN_RIGHT
                     }
                 }
 
-                // Rule 4: 90° Turn Left (`↰`) & Slight Left (`↖`)
-                // In a left turn, the upper arm/arrowhead shifts left relative to the bottom vertical stem (`topMeanX < bottomMeanX`)
-                val isStemRightTipLeft = dx < -0.08f && bottomMeanX > 0.51f && leftEdgeCount > 0 && leftEdgeMeanY < 0.58f
-                val isUpperHeavyLeft = topLeft > topRight * 1.22f && topMeanX < 0.48f && bottomLeft < bottomRight * 1.15f
+                // Rule 5: 90° Turn Left (`↰`), Roundabout Left (Screenshot_20261029-201832), & Slight Left (`↖`)
+                // Active pixels in the upper arm/arrowhead shift LEFT relative to the bottom vertical stem (`dx < -0.08f`).
+                val isStemRightTipLeft = dx < -0.08f && veryTopDx < -0.05f && stemBottomMeanX > 0.48f && leftEdgeCount > 0 && leftEdgeMeanY < 0.62f
+                val isUpperHeavyLeft = topLeft > topRight * 1.22f && topMeanX < 0.47f && stemBottomMeanX >= 0.46f && veryTopDx < -0.04f
 
                 if (isStemRightTipLeft || isUpperHeavyLeft) {
-                    return if (veryTopMeanX < 0.34f && leftEdgeMeanY < 0.18f && bottomMeanX > 0.62f) {
+                    if (isSingleBottomStem && stemBottomMeanX < 0.80f && rightLoopTwoRunRatio >= 0.24f) {
+                        return TurnTypeConstant.ROUNDABOUT_LEFT
+                    }
+                    return if (veryTopMeanX < 0.34f && leftEdgeMeanY < 0.18f && stemBottomMeanX > 0.62f) {
                         TurnTypeConstant.TURN_SLIGHTLY_LEFT
                     } else {
                         TurnTypeConstant.TURN_LEFT
                     }
                 }
 
-                // Rule 5: Roundabout with single bottom entry stem and hollow upper circle
-                if (hasUpperHollowLoop) {
-                    return if (topMeanX < 0.46f) TurnTypeConstant.ROUNDABOUT_LEFT else TurnTypeConstant.ROUNDABOUT
+                // Rule 6: Roundabout with single bottom entry stem and hollow upper circle
+                if (hasUpperHollowLoop && isSingleBottomStem) {
+                    return if (dx < -0.10f && veryTopDx < -0.08f) TurnTypeConstant.ROUNDABOUT_LEFT else TurnTypeConstant.ROUNDABOUT
                 }
 
-                // Rule 6: Continue Straight (`↑`)
+                // Rule 7: Safe Fallback -> Continue Straight (`↑`)
                 TurnTypeConstant.CONTINUE_STRAIGHT
-            }.getOrNull()
+            }.getOrDefault(TurnTypeConstant.CONTINUE_STRAIGHT)
         }
 
         internal fun parseDirectionFromIconResourceName(resName: String?): TurnTypeConstant? {
@@ -1098,7 +1179,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 return
             }
 
-            // High-priority immediate check vs routine distance countdown tick throttling (3 seconds):
+            // High-priority immediate check vs routine distance countdown tick throttling (1 second):
             // Fire immediately if action, direction, modifier, roundaboutExit, exitNumber, arrival state, or street name changed.
             val isHighPriorityChange = previousKey == null ||
                 previousKey.direction != newKey.direction ||
@@ -1239,21 +1320,21 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 )
             }
 
-            // Direction Extraction with multi-tier resolution:
-            // 1. Icon resource name check
-            val iconDirection = parseDirectionFromIconResourceName(iconResourceName)
-
-            // 2. Text direction from all textual sources (tickerText, title, text, subText, extraStrings)
-            val allCandidates = buildList {
-                if (cleanTicker.isNotBlank()) add(cleanTicker)
+            // Direction Extraction with Text-First priority:
+            // 1. Text-First Detection: Check EXTRA_TITLE, EXTRA_TEXT, and tickerText (plus TalkBack extraStrings)
+            //    for explicit navigation keywords first (never let subText ETA/distance summaries trigger false turns).
+            val textCandidates = buildList {
                 if (cleanTitle.isNotBlank()) add(cleanTitle)
                 if (cleanText.isNotBlank()) add(cleanText)
-                if (cleanSubText.isNotBlank()) add(cleanSubText)
+                if (cleanTicker.isNotBlank()) add(cleanTicker)
                 addAll(extraStrings)
+                if (cleanSubText.isNotBlank() && !isTripSummaryOrTimestampSegment(cleanSubText)) {
+                    add(cleanSubText)
+                }
             }
-            val textDirection = parseTurnDirectionFromCandidates(allCandidates)
+            val textDirection = parseTurnDirectionFromCandidates(textCandidates)
 
-            // 3. Fallback to icon shape analysis (24x24 pixel-density + normalized topology)
+            // 2. Reliable Icon Analysis (pixel distribution on EXTRA_LARGE_ICON / bitmap)
             val stage2BitmapCommand = largeIconBitmap?.let {
                 ManeuverExtractor.evaluate24x24IconFallback(
                     bitmap = it,
@@ -1262,6 +1343,9 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 )
             }
             val shapeDirection = iconShapeDirection ?: stage2BitmapCommand?.toTurnTypeConstant()
+
+            // 3. Optional test-only iconResourceName fallback (never populated on live notifications)
+            val iconDirection = parseDirectionFromIconResourceName(iconResourceName)
 
             val etaPair = parseEtaDurationHoursAndMinutes(cleanSubText, cleanText, cleanTitle)
 
@@ -1274,10 +1358,10 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 return null
             }
 
-            // Priority: Explicit text direction -> Icon resource name -> Icon shape -> Latch previous direction (if countdown in progress) -> CONTINUE_STRAIGHT
+            // Priority: Explicit text direction -> Icon pixel shape -> Test icon resource -> Latch previous direction (when no icon bitmap) -> CONTINUE_STRAIGHT
             val resolvedDirection = textDirection
-                ?: iconDirection
                 ?: shapeDirection
+                ?: iconDirection
                 ?: (if ((extractedDistance ?: 0) > 0 && fallbackPreviousDirection != null && fallbackPreviousDirection != TurnTypeConstant.DESTINATION_REACHED) {
                     fallbackPreviousDirection
                 } else {
@@ -1359,15 +1443,19 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             text: String,
             subText: String = ""
         ): TurnTypeConstant? {
-            val candidates = listOf(title, text, "$title $text", subText)
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
+            val candidates = buildList {
+                if (title.isNotBlank()) add(title.trim())
+                if (text.isNotBlank()) add(text.trim())
+                if (title.isNotBlank() && text.isNotBlank()) add("${title.trim()} ${text.trim()}")
+                if (subText.isNotBlank() && !isTripSummaryOrTimestampSegment(subText)) add(subText.trim())
+            }
             return parseTurnDirectionFromCandidates(candidates)
         }
 
         internal fun parseTurnDirectionFromCandidates(candidates: List<String>): TurnTypeConstant? {
             for (rawCandidate in candidates) {
-                // Strip street suffix after "onto / toward / towards / on" to isolate the maneuver verb first
+                if (rawCandidate.isBlank()) continue
+                // Strip street suffix after "onto / toward / towards" to isolate the maneuver verb first
                 val maneuverPrefixOnly = rawCandidate
                     .replace(DISTANCE_TOKEN_REGEX, " ")
                     .split(Regex("""(?i)\b(?:onto|toward|towards)\b"""), limit = 2)
@@ -1383,7 +1471,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
 
         internal fun matchManeuverPhrase(input: String): TurnTypeConstant? {
             if (input.isBlank()) return null
-            val lower = input.lowercase(Locale.US)
+            val lower = input.lowercase(Locale.US).trim()
 
             // 0. Explicit Unicode Directional Arrows & Sub-Cues (e.g. Google Maps sub-cue "Then ↱", "↱", "↰")
             if (lower.contains("then ↱") || lower.contains("then right") || lower.contains("then turn right") || lower.contains("↱") || lower.contains("->") || lower.contains("→")) {
@@ -1541,31 +1629,28 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             // 9. Standard Turn Left / Turn Right
             val hasExplicitTurnRight = lower.contains("turn right") ||
                 lower.contains("right onto") ||
+                lower.contains("right on ") ||
                 lower.contains("right toward") ||
                 lower.contains("right towards") ||
                 lower.contains("right at") ||
                 lower.contains("right turn") ||
                 lower.contains("make a right") ||
-                lower.contains("next right")
+                lower.contains("next right") ||
+                lower == "right"
 
             val hasExplicitTurnLeft = lower.contains("turn left") ||
                 lower.contains("left onto") ||
+                lower.contains("left on ") ||
                 lower.contains("left toward") ||
                 lower.contains("left towards") ||
                 lower.contains("left at") ||
                 lower.contains("left turn") ||
                 lower.contains("make a left") ||
-                lower.contains("next left")
+                lower.contains("next left") ||
+                lower == "left"
 
             if (hasExplicitTurnRight && !hasExplicitTurnLeft) return TurnTypeConstant.TURN_RIGHT
             if (hasExplicitTurnLeft && !hasExplicitTurnRight) return TurnTypeConstant.TURN_LEFT
-
-            // Isolated token matching:
-            val matchesRight = Regex("""\bright\b""").containsMatchIn(lower)
-            val matchesLeft = Regex("""\bleft\b""").containsMatchIn(lower)
-
-            if (matchesRight && !matchesLeft) return TurnTypeConstant.TURN_RIGHT
-            if (matchesLeft && !matchesRight) return TurnTypeConstant.TURN_LEFT
 
             // 10. Straight / Continue / Head / Merge
             if (lower.contains("straight at")) {
@@ -1582,12 +1667,60 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             return null
         }
 
+        // Regex helpers for filtering out ETA timestamps ("20:19", "14:44 ETA", "2019 ETA"), durations ("2 min", "1 hr"), and distances ("60 m", "1.2 km")
+        private val TIME_OR_ETA_TOKEN_REGEX = Regex(
+            pattern = """(?i)(?:\b\d{1,2}:\d{2}(?:\s*(?:am|pm|a\.m\.|p\.m\.))?(?:\.\.\.)?(?:\s*eta)?\b|\b\d{3,4}\s*eta\b|\beta\b)"""
+        )
+        private val DURATION_OR_TELEMETRY_KEYWORD_REGEX = Regex(
+            pattern = """(?i)\b(?:\d+\s*(?:days?|d|hours?|hrs?|hr|h|minutes?|mins?|min)|mins?|hrs?|eta|now)\b"""
+        )
+        private val PURE_DISTANCE_SEGMENT_REGEX = Regex(
+            pattern = """(?i)^\s*\d+(?:[.,]\d+)?\s*(?:kilometers?|kilometres?|km|meters?|metres?|m|miles?|mi|yards?|yds?|yd|feet|foot|ft)\s*$"""
+        )
+
+        internal fun isTripSummaryOrTimestampSegment(segment: String): Boolean {
+            val s = segment.replace('\u00A0', ' ').trim()
+            if (s.isBlank()) return true
+            val lower = s.lowercase(Locale.US)
+            if (lower == "now" || lower == "m..." || lower == "maps" || lower == "google maps") return true
+            if (PURE_DISTANCE_SEGMENT_REGEX.matches(s)) return true
+            if (TIME_OR_ETA_TOKEN_REGEX.containsMatchIn(s)) return true
+            if (DURATION_OR_TELEMETRY_KEYWORD_REGEX.containsMatchIn(s)) return true
+            return false
+        }
+
+        /**
+         * Cleans a potential street/road candidate by removing time formats (`HH:mm`, `\b\d{1,2}:\d{2}\b`),
+         * collapsed ETA strings (`2019 ETA`, `1444 ETA`), telemetry keywords (`ETA`, `min`, `mins`, `hr`, `km`, `m`, `now`),
+         * and leading maneuver instructions.
+         */
+        fun cleanStreetCandidate(raw: String): String {
+            var s = raw.replace('\u00A0', ' ').trim()
+            if (s.isBlank()) return ""
+
+            // Reject segments that are purely trip summaries, arrival timestamps ("20:19", "20:19 ETA", "14:44 ETA", "2019 ETA"), or distances ("60 m")
+            if (isTripSummaryOrTimestampSegment(s)) return ""
+
+            // Strip any embedded time formats (HH:mm) and telemetry keywords (ETA, min, mins, hr, km, m, now)
+            s = s.replace(TIME_OR_ETA_TOKEN_REGEX, " ")
+                .replace(DURATION_OR_TELEMETRY_KEYWORD_REGEX, " ")
+                .replace(Regex("""(?i)\b\d+(?:[.,]\d+)?\s*(?:km|m|mi|yd|yds)\b"""), " ")
+                .replace(Regex("""(?i)^in\s+\d+.*?(?:turn\s+(?:sharply\s+|sharp\s+|slightly\s+|slight\s+)?(?:left|right)|make\s+a\s+(?:u-turn|left|right)|continue(?:\s+straight)?|head\s+\w+|keep\s+(?:left|right)|stay\s+(?:left|right))\s+(?:at\s+.*?\s+)?(?:onto|towards|toward|on|into|to)\s+"""), "")
+                .replace(Regex("""(?i)^(?:at\s+the\s+roundabout,\s*take\s+the\s+\d+(?:st|nd|rd|th)?\s+exit|at\s+the\s+fork,\s*(?:stay|keep)\s+(?:left|right)|turn\s+(?:sharply\s+|sharp\s+|slightly\s+|slight\s+)?(?:left|right)|make\s+a\s+(?:right\s+)?(?:u-turn|left|right)|take\s+(?:the\s+)?(?:exit\s+[A-Za-z0-9\-]+\s+)?(?:left|right)?|keep\s+(?:left|right)(?:\s+at\s+the\s+intersection)?|stay\s+(?:left|right)|bear\s+(?:left|right)|sharp\s+(?:left|right)|slight\s+(?:left|right)|continue(?:\s+straight)?|head\s+\w+|merge)\s*(?:onto|towards|toward|on|into|for|to)?\s*"""), "")
+                .replace(Regex("""(?i)^(?:towards|toward|onto|into)\s+"""), "")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+
+            return s
+        }
+
         /**
          * Extracts the target street name or destination locality from Google Maps navigation text
          * (e.g. "towards Police Nagar", "CRPF Rd", "onto Central Bazar Road", "Kachipura Chowk", "Wardha Rd").
          *
-         * Abbreviates road descriptors (Road -> Rd, Street -> St, Avenue -> Ave) to ensure the result
-         * cleanly fits within the TVS iQube cluster's 17-character ASCII location banner (0x5B 0x5C).
+         * Handles dynamic title/text field swapping by prioritizing `text` and `title` first, filtering out
+         * arrival timestamps (`20:19`, `14:44`, `2019 ETA`, `1444 ETA`) and telemetry tokens (`ETA`, `min`, `mins`, `hr`, `km`, `m`, `now`),
+         * and abbreviating road descriptors (Road -> Rd, Street -> St, Square -> Sq) to fit within the 17-character scooter display.
          */
         fun extractTargetStreetOrLocation(
             title: String,
@@ -1599,29 +1732,27 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
         ): String {
             val candidates = mutableListOf<String>()
             fun addClean(s: String) {
-                s.split('\n', '·', '|', '/').forEach { part ->
+                s.split('\n', '·', '•', '|', '/').forEach { part ->
                     val clean = part.replace('\u00A0', ' ').trim()
-                    if (clean.isNotBlank() && !isIgnoredUiLabel(clean) && !candidates.contains(clean)) {
+                    if (clean.isNotBlank() && !isIgnoredUiLabel(clean) && !isTripSummaryOrTimestampSegment(clean) && !candidates.contains(clean)) {
                         candidates.add(clean)
                     }
                 }
             }
 
-            addClean(subText)
+            // Prioritize `text` and `title` first (since Google Maps swaps title/text when approaching a turn),
+            // followed by `subText` (for 2-line street banners like "onto Central Bazar Road" / "CRPF Rd") and `tickerText`.
             addClean(text)
-            addClean(bigText)
-            addClean(tickerText)
             addClean(title)
+            addClean(bigText)
+            addClean(subText)
+            addClean(tickerText)
             extraStrings.forEach { addClean(it) }
 
-            // Filter out distances, ETAs, clock times, system notices, and pure maneuver words
             val filtered = candidates.filter { s ->
                 val lower = s.lowercase(Locale.US)
-                !DISTANCE_TOKEN_REGEX.matches(s) &&
-                    !CLOCK_TIME_REGEX.matches(s) &&
+                !isTripSummaryOrTimestampSegment(s) &&
                     !isIgnoredUiLabel(s) &&
-                    !lower.contains("min") &&
-                    !lower.contains("hr") &&
                     !lower.contains("cyclonic") &&
                     !lower.contains("traffic") &&
                     !lower.contains("fastest") &&
@@ -1631,37 +1762,51 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     !lower.contains("searching for") &&
                     !lower.startsWith("then ↱") &&
                     !lower.startsWith("then ↰") &&
+                    !lower.startsWith("only ") &&
+                    !lower.contains("reviews") &&
                     s.length >= 2
             }
 
             var bestStreetName: String? = null
             var bestLocalityName: String? = null
 
-            val roadKeywordRegex = Regex("""(?i)\b(?:road|rd|marg|street|st|chowk|square|sq|nagar|flyover|bypass|lane|ln|ave|avenue|blvd|highway|hwy|expwy|circle|path|way)\b""")
-            val prepositionRegex = Regex("""(?i)\b(?:towards|toward|onto|on|into|along|to)\s+([A-Za-z0-9\s.'-]+)""")
+            val roadKeywordRegex = Regex("""(?i)\b(?:road|rd|marg|street|st|chowk|square|sq|nagar|flyover|bypass|lane|ln|ave|avenue|blvd|highway|hwy|expwy|circle|path|way|nh-\d+|sh-\d+|bridge|bazar|market|colony|layout)\b""")
+            val prepositionOntoRegex = Regex("""(?i)\b(?:onto|towards|toward|into|along)\s+([A-Za-z0-9\s.'-]+)""")
 
             for (cand in filtered) {
-                val prepMatch = prepositionRegex.find(cand)
-                val target = prepMatch?.groupValues?.get(1)?.trim() ?: cand.trim()
+                val ontoMatch = prepositionOntoRegex.find(cand)
+                val rawTarget = ontoMatch?.groupValues?.get(1)?.trim() ?: cand.trim()
+                val cleanedTarget = cleanStreetCandidate(rawTarget)
 
-                val cleanedTarget = target
-                    .replace(Regex("""(?i)^in\s+\d+.*?(?:turn\s+(?:left|right|sharp\s+right|slight\s+right|slight\s+left|sharp\s+left)|continue|head)\s+(?:onto|towards|toward|on|into)\s+"""), "")
-                    .replace(Regex("""(?i)^(?:turn\s+(?:left|right|sharp\s+right|slight\s+right|slight\s+left|sharp\s+left)|make\s+a\s+(?:left|right)|take\s+(?:left|right)|continue|head)\s+(?:onto|towards|toward|on|into)\s+"""), "")
-                    .replace(DISTANCE_TOKEN_REGEX, "")
-                    .trim()
+                if (cleanedTarget.isBlank() || isIgnoredUiLabel(cleanedTarget) || isTripSummaryOrTimestampSegment(cleanedTarget)) {
+                    continue
+                }
 
-                if (cleanedTarget.isBlank() || isIgnoredUiLabel(cleanedTarget)) continue
+                // Must contain at least one 2+ letter alphabetic word (never purely numeric or "2019")
+                if (!Regex("""[A-Za-z]{2,}""").containsMatchIn(cleanedTarget)) {
+                    continue
+                }
 
                 val lowerTarget = cleanedTarget.lowercase(Locale.US)
-                if (lowerTarget == "turn right" || lowerTarget == "turn left" || lowerTarget == "continue" || lowerTarget == "destination") {
+                if (
+                    lowerTarget in setOf(
+                        "turn right", "turn left", "sharp right", "sharp left",
+                        "slight right", "slight left", "keep right", "keep left",
+                        "continue", "continue straight", "straight", "u-turn",
+                        "make a u-turn", "destination", "you have arrived", "arrived"
+                    )
+                ) {
                     continue
                 }
 
                 if (roadKeywordRegex.containsMatchIn(cleanedTarget)) {
-                    if (bestStreetName == null || (!bestStreetName.contains(Regex("""(?i)\b(?:rd|road)\b""")) && cleanedTarget.contains(Regex("""(?i)\b(?:rd|road)\b""")))) {
+                    if (
+                        bestStreetName == null ||
+                        (!bestStreetName.contains(Regex("""(?i)\b(?:rd|road)\b""")) && cleanedTarget.contains(Regex("""(?i)\b(?:rd|road)\b""")) && cand == subText.trim())
+                    ) {
                         bestStreetName = cleanedTarget
                     }
-                } else if (bestLocalityName == null && cleanedTarget.length in 3..25) {
+                } else if (bestLocalityName == null && cleanedTarget.length in 3..28) {
                     bestLocalityName = cleanedTarget
                 }
             }
@@ -1680,9 +1825,10 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 .replace(Regex("""(?i)\bsquare\b"""), "Sq")
                 .replace(Regex("""(?i)^(?:towards|toward|onto|on|into)\s+"""), "")
                 .replace(Regex("""[^A-Za-z0-9\s.'-]"""), "")
+                .replace(Regex("""\s+"""), " ")
                 .trim()
 
-            return abbreviated.take(17)
+            return abbreviated.take(17).trim()
         }
 
         /**

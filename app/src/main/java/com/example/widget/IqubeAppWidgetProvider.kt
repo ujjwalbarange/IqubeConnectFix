@@ -67,9 +67,17 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
             val tele = bleManager.packetParser.telemetryState.value
             val lastSeen = bleManager.lastSeenState.value
             val trueRange = bleManager.trueRangeState.value
+            val charging = bleManager.chargingMonitorState.value
+            val isCharging = tele.isCharging || charging.isCharging
 
-            val batteryPct = tele.batteryPercent ?: lastSeen?.batteryPct ?: 93
-            val clusterRangeKm = tele.clusterRangeKm ?: lastSeen?.clusterRangeKm ?: 98.0
+            val batteryPct = tele.batteryPercent
+                ?: charging.currentBatteryPct
+                ?: lastSeen?.batteryPct
+                ?: 93
+            val clusterRangeKm = tele.clusterRangeKm
+                ?: charging.clusterRangeKm
+                ?: lastSeen?.clusterRangeKm
+                ?: 98.0
             val ecoTrue = trueRange.trueEcoRangeKm ?: (batteryPct * trueRange.ecoKmPerPct)
             val pwrTrue = trueRange.truePowerRangeKm ?: (batteryPct * trueRange.powerKmPerPct)
 
@@ -77,11 +85,12 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
                 lastSeen?.locationName ?: "Dhantoli"
             }
 
-            val charging = bleManager.chargingMonitorState.value
-            val isCharging = tele.isCharging || charging.isCharging
-
             // Connection Status Badge
             when {
+                charging.isDisconnectedPredicted -> {
+                    views.setTextViewText(R.id.widget_status_badge, "⚡ Pred • Calibrate")
+                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#FFB300")) // Amber Warning
+                }
                 isCharging -> {
                     views.setTextViewText(R.id.widget_status_badge, "⚡ Charging")
                     views.setTextColor(R.id.widget_status_badge, Color.parseColor("#00E5FF")) // Electric Cyan
@@ -93,6 +102,10 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
                 isConnecting -> {
                     views.setTextViewText(R.id.widget_status_badge, "⟳ Connecting")
                     views.setTextColor(R.id.widget_status_badge, Color.parseColor("#FFA000")) // Amber
+                }
+                charging.needsCalibration -> {
+                    views.setTextViewText(R.id.widget_status_badge, "⚠️ Needs Cal")
+                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#FFB300"))
                 }
                 else -> {
                     views.setTextViewText(R.id.widget_status_badge, "○ Disconnected")
@@ -148,13 +161,15 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
 
             views.setTextViewText(R.id.widget_location, "📍 $locality")
 
-            val timeStr = if (isCharging) {
-                "⚡ Charging Active"
-            } else if (isConnected) {
-                "Live Telemetry"
-            } else {
-                val ts = lastSeen?.timestampMs ?: System.currentTimeMillis()
-                "Last seen " + SimpleDateFormat("hh:mm a", Locale.US).format(Date(ts))
+            val timeStr = when {
+                charging.isDisconnectedPredicted -> "⚠️ Predicted • Needs Calibration"
+                isCharging -> "⚡ Charging Active"
+                isConnected -> "Live Telemetry"
+                charging.needsCalibration -> "⚠️ Needs Calibration"
+                else -> {
+                    val ts = lastSeen?.timestampMs ?: System.currentTimeMillis()
+                    "Last seen " + SimpleDateFormat("hh:mm a", Locale.US).format(Date(ts))
+                }
             }
             views.setTextViewText(R.id.widget_last_seen, timeStr)
 

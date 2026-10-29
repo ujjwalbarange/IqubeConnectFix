@@ -111,6 +111,7 @@ fun IqubeCompanionApp(
     val phoneStatusState by viewModel.phoneStatusState.collectAsStateWithLifecycle()
     val selectedRangeMode by viewModel.selectedRangeMode.collectAsStateWithLifecycle()
     val savedTrips by viewModel.savedTrips.collectAsStateWithLifecycle()
+    val savedChargingSessions by viewModel.savedChargingSessions.collectAsStateWithLifecycle()
     val activeTripSession by viewModel.activeTripSession.collectAsStateWithLifecycle()
 
     val detectedLocalityName by viewModel.detectedLocalityName.collectAsStateWithLifecycle()
@@ -225,7 +226,7 @@ fun IqubeCompanionApp(
                         negotiatedMtu = negotiatedMtu,
                         isIgnitionUnlocked = telemetry.isIgnitionUnlocked,
                         rideMode = telemetry.rideMode,
-                        isCharging = telemetry.isCharging,
+                        isCharging = telemetry.isCharging || chargingMonitor.isCharging,
                         isLinkDegraded = isLinkDegraded,
                         linkWarningMessage = linkWarningMessage,
                         riderGreetingName = riderGreetingName,
@@ -269,6 +270,9 @@ fun IqubeCompanionApp(
                                     onClearNavigationClick = viewModel::clearNavigationOnCluster,
                                     onSimulateChargingStepClick = viewModel::simulateLiveOnePercentChargingStep,
                                     onToggleChargingClick = viewModel::toggleReplayChargingState,
+                                    onSimulateDisconnectWhileChargingClick = viewModel::simulateDisconnectWhileCharging,
+                                    onCalibrateOfflineBatterySoc = viewModel::calibrateOfflineBatterySoc,
+                                    onStopOfflinePredictedChargingClick = viewModel::stopOfflinePredictedCharging,
                                     riderGreetingName = riderGreetingName,
                                     musicTrackTitle = musicTrackTitle,
                                     mediaPlayerState = mediaPlayerState,
@@ -300,12 +304,17 @@ fun IqubeCompanionApp(
                             DashboardDestination.SAVED_TRIPS -> {
                                 SavedTripsHistoryScreen(
                                     savedTrips = savedTrips,
+                                    savedChargingSessions = savedChargingSessions,
+                                    chargingMonitor = chargingMonitor,
                                     activeTripSession = activeTripSession,
                                     telemetry = telemetry,
                                     trueRange = trueRange,
                                     onLogSampleTripClick = viewModel::logSampleVerifiedTrip,
                                     onDeleteTripClick = viewModel::deleteSavedTrip,
                                     onClearAllTripsClick = viewModel::clearAllSavedTrips,
+                                    onLogSampleChargingSessionClick = viewModel::logSampleChargingSession,
+                                    onDeleteChargingSessionClick = viewModel::deleteChargingSession,
+                                    onClearAllChargingSessionsClick = viewModel::clearAllChargingSessions,
                                     onExportCsv = viewModel::exportSavedTripsCsv,
                                     onExportJson = viewModel::exportSavedTripsJson
                                 )

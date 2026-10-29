@@ -31,6 +31,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
+import java.util.Locale
 import com.example.MainActivity
 import com.example.model.ChargingAlertConfig
 import com.example.model.ChargingAlertType
@@ -156,7 +157,7 @@ class IqubeBleManager(
     }
 
     fun setChargingAlertTargetPct(targetPct: Int) {
-        val clamped = targetPct.coerceIn(50, 100)
+        val clamped = targetPct.coerceIn(20, 100)
         _chargingAlertConfig.update { it.copy(targetPct = clamped) }
         alertPrefs.edit().putInt("charging_alert_target_pct", clamped).apply()
         hasTriggeredChargingAlertForSession = false
@@ -349,13 +350,42 @@ class IqubeBleManager(
     private val _activeTripSession = MutableStateFlow<ActiveTripSession?>(null)
     val activeTripSession: StateFlow<ActiveTripSession?> = _activeTripSession.asStateFlow()
 
-    // Active Charging Session & 1% Step Timing Tracking
+    // Active Charging Session, 1% Step Timing & Offline Predicted Charging / Calibration Tracking
+    private data class OfflineChargingInternalState(
+        val isOfflinePredicted: Boolean = false,
+        val needsCalibration: Boolean = false,
+        val predictedBatteryPct: Int? = null,
+        val predictedClusterRangeKm: Double? = null,
+        val nextPctProgress: Float = 0f,
+        val disconnectStartBatteryPct: Int? = null,
+        val calibrationStatusLabel: String = "Calibrated (Live BMS)"
+    )
+
     private var chargingSessionStartMs: Long? = null
+    private var offlineDisconnectTimestampMs: Long? = null
+    private var offlineChargingTickerJob: Job? = null
     private val _chargingSessionStartSoc = MutableStateFlow<Int?>(null)
     private var lastChargingSocValue: Int? = null
     private var lastChargingSocStepTimestampMs: Long? = null
     private var firstChargingTickSeen: Boolean = false
     private val _liveChargingStepDurationsSec = MutableStateFlow<List<Double>>(emptyList())
+    private val _offlineChargingState = MutableStateFlow(
+        OfflineChargingInternalState(
+            isOfflinePredicted = false,
+            needsCalibration = tripRepository.lastSeenState.value?.needsCalibration == true,
+            predictedBatteryPct = if (tripRepository.lastSeenState.value?.isOfflinePredictedCharging == true) {
+                tripRepository.lastSeenState.value?.batteryPct
+            } else null,
+            predictedClusterRangeKm = if (tripRepository.lastSeenState.value?.isOfflinePredictedCharging == true) {
+                tripRepository.lastSeenState.value?.clusterRangeKm
+            } else null,
+            calibrationStatusLabel = if (tripRepository.lastSeenState.value?.needsCalibration == true) {
+                "Needs Calibration (Disconnected During Charging)"
+            } else {
+                "Calibrated (Live BMS)"
+            }
+        )
+    )
 
     // Selected Range Display Mode on Cockpit (Eco vs Power)
     private val _selectedRangeMode = MutableStateFlow(RideMode.ECO)
@@ -384,20 +414,23 @@ class IqubeBleManager(
 
     val lastSeenState: StateFlow<LastSeenScooterState?> = tripRepository.lastSeenState
 
-    // Reactive True Range Calculation Engine combining live telemetry (or offline Last Seen battery %), savedTrips, and activeTripSession
+    // Reactive True Range Calculation Engine combining live telemetry (or offline Predicted / Last Seen battery %), savedTrips, and activeTripSession
     val trueRangeState: StateFlow<TrueRangeCalculation> = combine(
         packetParser.telemetryState,
         tripRepository.savedTrips,
         _activeTripSession,
-        tripRepository.lastSeenState
-    ) { tele, savedTrips, activeSession, lastSeen ->
+        tripRepository.lastSeenState,
+        _offlineChargingState
+    ) { tele, savedTrips, activeSession, lastSeen, offlineChg ->
         val integratedKm = tele.integratedDistanceMeters / 1000.0
         val odoDeltaKm = if (activeSession?.startOdometerKm != null && tele.odometerKm != null) {
             max(0.0, tele.odometerKm - activeSession.startOdometerKm)
         } else 0.0
         val activeDistKm = max(integratedKm, odoDeltaKm)
-        // Use live battery % when connected, or fallback to Last Seen battery % when offline
-        val effectiveBatteryPct = tele.batteryPercent ?: lastSeen?.batteryPct
+        // Use live battery % when connected, or offline predicted charging %, or fallback to Last Seen battery %
+        val effectiveBatteryPct = tele.batteryPercent
+            ?: (if (offlineChg.isOfflinePredicted) offlineChg.predictedBatteryPct else null)
+            ?: lastSeen?.batteryPct
 
         TrueRangeAndTripRepository.computeTrueRange(
             currentBatteryPct = effectiveBatteryPct,
@@ -415,31 +448,47 @@ class IqubeBleManager(
         )
     )
 
-    // Reactive 3-Tier Charging Monitor State
+    // Reactive 3-Tier Charging Monitor State (Live BLE Charging + Disconnected Predicted Charging + Historical Interval Analysis)
     val chargingMonitorState: StateFlow<ChargingMonitorState> = combine(
         packetParser.telemetryState,
         _chargingSessionStartSoc,
         _liveChargingStepDurationsSec,
-        tripRepository.savedChargingSessions
-    ) { tele, startSoc, liveSteps, savedSessions ->
+        tripRepository.savedChargingSessions,
+        _offlineChargingState
+    ) { tele, startSoc, liveSteps, savedSessions, offlineChg ->
+        val effectiveCharging = tele.isCharging || offlineChg.isOfflinePredicted
+        val effectiveBatteryPct = tele.batteryPercent
+            ?: (if (offlineChg.isOfflinePredicted) offlineChg.predictedBatteryPct else null)
+            ?: tripRepository.lastSeenState.value?.batteryPct
+        val effectiveClusterRangeKm = tele.clusterRangeKm
+            ?: (if (offlineChg.isOfflinePredicted) offlineChg.predictedClusterRangeKm else null)
+            ?: tripRepository.lastSeenState.value?.clusterRangeKm
+
         TrueRangeAndTripRepository.computeChargingMonitorState(
-            isCharging = tele.isCharging,
-            currentBatteryPct = tele.batteryPercent,
-            clusterRangeKm = tele.clusterRangeKm,
-            sessionStartBatteryPct = startSoc,
+            isCharging = effectiveCharging,
+            currentBatteryPct = effectiveBatteryPct,
+            clusterRangeKm = effectiveClusterRangeKm,
+            sessionStartBatteryPct = startSoc ?: offlineChg.disconnectStartBatteryPct,
             liveStepDurationsSec = liveSteps,
-            savedChargingSessions = savedSessions
+            savedChargingSessions = savedSessions,
+            isDisconnectedPredicted = offlineChg.isOfflinePredicted && !tele.isCharging,
+            needsCalibration = offlineChg.needsCalibration,
+            calibrationStatusLabel = offlineChg.calibrationStatusLabel,
+            nextPercentProgressFraction = if (offlineChg.isOfflinePredicted && !tele.isCharging) offlineChg.nextPctProgress else 0f,
+            disconnectStartBatteryPct = offlineChg.disconnectStartBatteryPct
         )
     }.stateIn(
         scope = scope,
         started = SharingStarted.Eagerly,
         initialValue = TrueRangeAndTripRepository.computeChargingMonitorState(
             isCharging = false,
-            currentBatteryPct = null,
-            clusterRangeKm = null,
+            currentBatteryPct = tripRepository.lastSeenState.value?.batteryPct,
+            clusterRangeKm = tripRepository.lastSeenState.value?.clusterRangeKm,
             sessionStartBatteryPct = null,
             liveStepDurationsSec = emptyList(),
-            savedChargingSessions = tripRepository.savedChargingSessions.value
+            savedChargingSessions = tripRepository.savedChargingSessions.value,
+            isDisconnectedPredicted = false,
+            needsCalibration = tripRepository.lastSeenState.value?.needsCalibration == true
         )
     )
 
@@ -497,8 +546,60 @@ class IqubeBleManager(
                     _connectedDeviceName.value = tele.vehicleIdString
                 }
 
-                // 2. Track live +1% Charging Step Timing when charging is active (0x11 Byte 5 == 0x01 and 0x13 Byte 5 == 0x06)
                 val now = System.currentTimeMillis()
+
+                // 1b. Auto-Calibrate if Scooter Reconnects with Live BMS Telemetry after Offline Predicted Charging
+                val offlineSnap = _offlineChargingState.value
+                if (tele.batteryPercent != null && (offlineSnap.isOfflinePredicted || offlineSnap.needsCalibration)) {
+                    val actualSoc = tele.batteryPercent
+                    val predictedSoc = offlineSnap.predictedBatteryPct
+                    val deltaPct = if (predictedSoc != null) actualSoc - predictedSoc else 0
+                    val discStartSoc = offlineSnap.disconnectStartBatteryPct ?: _chargingSessionStartSoc.value
+                    val discStartMs = offlineDisconnectTimestampMs
+                    if (discStartSoc != null && discStartMs != null && actualSoc > discStartSoc) {
+                        val offlineGained = actualSoc - discStartSoc
+                        val elapsedSec = max(60.0, (now - discStartMs) / 1000.0)
+                        val realOfflineRate = (elapsedSec / offlineGained.toDouble()).coerceIn(60.0, 260.0)
+                        _liveChargingStepDurationsSec.update { (it + realOfflineRate).takeLast(10) }
+                    }
+                    offlineChargingTickerJob?.cancel()
+                    offlineChargingTickerJob = null
+                    offlineDisconnectTimestampMs = null
+
+                    val calLabel = if (predictedSoc != null) {
+                        if (deltaPct == 0) {
+                            "Calibrated with Scooter BMS ($actualSoc% • Exact Match)"
+                        } else {
+                            String.format(Locale.US, "Calibrated with Scooter BMS (%d%% • %+d%% vs Predicted %d%%)", actualSoc, deltaPct, predictedSoc)
+                        }
+                    } else {
+                        "Calibrated with Scooter BMS ($actualSoc%)"
+                    }
+
+                    _offlineChargingState.value = OfflineChargingInternalState(
+                        isOfflinePredicted = false,
+                        needsCalibration = false,
+                        predictedBatteryPct = null,
+                        predictedClusterRangeKm = null,
+                        nextPctProgress = 0f,
+                        disconnectStartBatteryPct = null,
+                        calibrationStatusLabel = calLabel
+                    )
+
+                    if (!tele.isCharging) {
+                        commitActiveChargingSession(
+                            endSoc = actualSoc,
+                            wasOfflinePredicted = true,
+                            calibrationDeltaPct = deltaPct,
+                            source = "Offline Predicted + BMS Calibrated"
+                        )
+                    } else {
+                        lastChargingSocValue = actualSoc
+                        lastChargingSocStepTimestampMs = now
+                    }
+                }
+
+                // 2. Track live +1% Charging Step Timing when charging is active (0x11 Byte 5 == 0x01 and 0x13 Byte 5 == 0x06)
                 if (tele.isCharging && tele.batteryPercent != null) {
                     val soc = tele.batteryPercent
                     val alertCfg = _chargingAlertConfig.value
@@ -531,7 +632,15 @@ class IqubeBleManager(
                             lastChargingSocStepTimestampMs = now
                         }
                     }
-                } else {
+                } else if (!tele.isCharging && !_offlineChargingState.value.isOfflinePredicted) {
+                    if (tele.batteryPercent != null && chargingSessionStartMs != null) {
+                        commitActiveChargingSession(
+                            endSoc = tele.batteryPercent,
+                            wasOfflinePredicted = false,
+                            calibrationDeltaPct = 0,
+                            source = "Connected BLE Session"
+                        )
+                    }
                     hasTriggeredChargingAlertForSession = false
                 }
 
@@ -550,7 +659,9 @@ class IqubeBleManager(
                             latitude = loc?.latitude ?: 21.1358,
                             longitude = loc?.longitude ?: 79.0790,
                             wasCharging = tele.isCharging,
-                            vehicleId = tele.vehicleIdString ?: IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT
+                            vehicleId = tele.vehicleIdString ?: IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT,
+                            needsCalibration = _offlineChargingState.value.needsCalibration,
+                            isOfflinePredictedCharging = _offlineChargingState.value.isOfflinePredicted
                         )
                     )
                 }
@@ -1217,6 +1328,10 @@ class IqubeBleManager(
      * so the user can test the Tier 1/2 Baseline -> Tier 3 Live `1%` Step Timing transition on demand.
      */
     fun simulateLiveOnePercentChargingStep() {
+        if (_offlineChargingState.value.isOfflinePredicted) {
+            advanceOfflinePredictedChargingByOnePercent()
+            return
+        }
         val currentSoc = (packetParser.telemetryState.value.batteryPercent ?: replayBatterySoc).coerceIn(1, 99)
         val nextSoc = (currentSoc + 1).coerceAtMost(100)
         replayBatterySoc = nextSoc
@@ -1577,7 +1692,7 @@ class IqubeBleManager(
      * `0.3 km` Trip A & `1.0 km` Trip B (`0x5A 0x11`), and `"TVSiQUBEJI573"` (`0x5A 0x7D`).
      */
     fun startBtsnoozHciLogReplay() {
-        disconnectBle(userInitiated = true)
+        disconnectBle(userInitiated = true, keepOfflineChargingPrediction = false)
         packetParser.resetIntegratedSubMeterTrip()
         startGpsTelemetryFusion()
 
@@ -1679,7 +1794,7 @@ class IqubeBleManager(
      * and `"TVSiQUBEJI573"` in `0x5A 0x7D`).
      */
     fun startChargingCaptureReplay() {
-        disconnectBle(userInitiated = true)
+        disconnectBle(userInitiated = true, keepOfflineChargingPrediction = false)
         packetParser.resetIntegratedSubMeterTrip()
         startGpsTelemetryFusion()
 
@@ -2205,16 +2320,17 @@ class IqubeBleManager(
         )
     }
 
-    private fun finalizeSessionOnDisconnect(disconnectReason: String) {
+    private fun commitActiveChargingSession(
+        endSoc: Int,
+        wasOfflinePredicted: Boolean,
+        calibrationDeltaPct: Int,
+        source: String
+    ) {
         val now = System.currentTimeMillis()
-        val tele = packetParser.telemetryState.value
-
-        // 1. Finalize Charging Session if charging occurred with >= 1% gain
         val startChgMs = chargingSessionStartMs
         val startChgSoc = _chargingSessionStartSoc.value
-        val endChgSoc = tele.batteryPercent
-        if (startChgMs != null && startChgSoc != null && endChgSoc != null && endChgSoc > startChgSoc) {
-            val pctGained = endChgSoc - startChgSoc
+        if (startChgMs != null && startChgSoc != null && endSoc > startChgSoc) {
+            val pctGained = endSoc - startChgSoc
             val liveSteps = _liveChargingStepDurationsSec.value
             val avgSecPerPct = if (liveSteps.isNotEmpty()) {
                 liveSteps.average()
@@ -2222,16 +2338,51 @@ class IqubeBleManager(
                 max(60.0, ((now - startChgMs) / 1000.0) / pctGained.toDouble())
             }
             val durationSec = (pctGained * avgSecPerPct).toLong().coerceAtLeast(60L)
+            val ccGained = max(0, minOf(80, endSoc) - minOf(80, startChgSoc))
+            val cvGained = max(0, endSoc - max(80, startChgSoc))
+
+            val ccSteps = mutableListOf<Double>()
+            val cvSteps = mutableListOf<Double>()
+            liveSteps.forEachIndexed { idx, stepSec ->
+                if (startChgSoc + idx + 1 <= 80) {
+                    ccSteps.add(stepSec)
+                } else {
+                    cvSteps.add(stepSec)
+                }
+            }
+            val ccRate = when {
+                ccSteps.isNotEmpty() -> (ccSteps.average() * 10.0).roundToInt() / 10.0
+                ccGained > 0 -> (avgSecPerPct * 10.0).roundToInt() / 10.0
+                else -> 0.0
+            }
+            val cvRate = when {
+                cvSteps.isNotEmpty() -> (cvSteps.average() * 10.0).roundToInt() / 10.0
+                cvGained > 0 -> (avgSecPerPct * 10.0).roundToInt() / 10.0
+                else -> 0.0
+            }
+
+            val kwhAdded = ((pctGained * 0.0304) * 100.0).roundToInt() / 100.0
+            val ecoRangeAdded = ((pctGained * trueRangeState.value.ecoKmPerPct) * 10.0).roundToInt() / 10.0
+
             tripRepository.saveChargingSession(
                 SavedChargingSession(
                     id = "chg_$now",
                     startTimeMs = startChgMs,
                     endTimeMs = now,
                     startPct = startChgSoc,
-                    endPct = endChgSoc,
+                    endPct = endSoc,
                     pctGained = pctGained,
                     durationSeconds = durationSec,
-                    avgSecondsPerPct = (avgSecPerPct * 10.0).roundToInt() / 10.0
+                    avgSecondsPerPct = (avgSecPerPct * 10.0).roundToInt() / 10.0,
+                    cc0To80PctGained = ccGained,
+                    cc0To80SecondsPerPct = ccRate,
+                    cv80To100PctGained = cvGained,
+                    cv80To100SecondsPerPct = cvRate,
+                    estimatedKwhAdded = kwhAdded,
+                    trueEcoRangeAddedKm = ecoRangeAdded,
+                    wasOfflinePredicted = wasOfflinePredicted,
+                    calibrationDeltaPct = calibrationDeltaPct,
+                    sessionSource = source
                 )
             )
         }
@@ -2241,6 +2392,336 @@ class IqubeBleManager(
         lastChargingSocStepTimestampMs = null
         firstChargingTickSeen = false
         _liveChargingStepDurationsSec.value = emptyList()
+    }
+
+    /**
+     * Enters Offline Predicted Charging Mode when BLE disconnects while the scooter is charging
+     * (e.g., user turns off the scooter key while plugged in).
+     * Continues increasing predicted battery `%` according to the learned/predicted charging time,
+     * marks status as "Needs Calibration", and keeps the Charging Target Alarm active.
+     */
+    private fun enterOfflinePredictedChargingMode(
+        disconnectSoc: Int,
+        disconnectRangeKm: Double?
+    ) {
+        val now = System.currentTimeMillis()
+        if (chargingSessionStartMs == null) {
+            chargingSessionStartMs = now
+        }
+        if (_chargingSessionStartSoc.value == null) {
+            _chargingSessionStartSoc.value = disconnectSoc
+        }
+        offlineDisconnectTimestampMs = now
+        val clampedSoc = disconnectSoc.coerceIn(1, 100)
+        val rangeKm = disconnectRangeKm ?: ((clampedSoc * 1.05) * 10.0).roundToInt() / 10.0
+
+        _offlineChargingState.value = OfflineChargingInternalState(
+            isOfflinePredicted = true,
+            needsCalibration = true,
+            predictedBatteryPct = clampedSoc,
+            predictedClusterRangeKm = rangeKm,
+            nextPctProgress = 0f,
+            disconnectStartBatteryPct = clampedSoc,
+            calibrationStatusLabel = "Needs Calibration (Predicted from $clampedSoc% at disconnect)"
+        )
+
+        val loc = _lastKnownLocation.value
+        val locality = _detectedLocalityName.value.ifBlank { "Dhantoli" }
+        tripRepository.saveLastSeenState(
+            LastSeenScooterState(
+                timestampMs = now,
+                batteryPct = clampedSoc,
+                odometerKm = tripRepository.lastSeenState.value?.odometerKm ?: 35925.2,
+                clusterRangeKm = rangeKm,
+                tripAKm = tripRepository.lastSeenState.value?.tripAKm ?: 0.3,
+                tripBKm = tripRepository.lastSeenState.value?.tripBKm ?: 1.0,
+                locationName = locality,
+                latitude = loc?.latitude ?: 21.1358,
+                longitude = loc?.longitude ?: 79.0790,
+                wasCharging = true,
+                vehicleId = _connectedDeviceName.value.ifBlank { IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT },
+                needsCalibration = true,
+                isOfflinePredictedCharging = true
+            )
+        )
+
+        // Ensure foreground service stays running so the charging target alarm fires even while scooter is off
+        IqubeBleForegroundService.startService(context)
+        startOfflinePredictedChargingTicker()
+        com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+        com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+    }
+
+    private fun startOfflinePredictedChargingTicker() {
+        offlineChargingTickerJob?.cancel()
+        offlineChargingTickerJob = scope.launch {
+            var elapsedStepSec = 0.0
+            while (isActive && _offlineChargingState.value.isOfflinePredicted) {
+                delay(1_000L)
+                val currState = _offlineChargingState.value
+                val currSoc = currState.predictedBatteryPct ?: break
+                if (currSoc >= 100) {
+                    break
+                }
+                val chgState = chargingMonitorState.value
+                val targetStepSec = if (currSoc >= 80) {
+                    chgState.learned80To100SecPerPct.coerceIn(60.0, 300.0)
+                } else {
+                    chgState.activeSecondsPerPct.coerceIn(60.0, 240.0)
+                }
+
+                elapsedStepSec += 1.0
+                if (elapsedStepSec >= targetStepSec) {
+                    elapsedStepSec = 0.0
+                    advanceOfflinePredictedChargingByOnePercent()
+                } else {
+                    val progress = (elapsedStepSec / targetStepSec).toFloat().coerceIn(0f, 0.99f)
+                    _offlineChargingState.update { it.copy(nextPctProgress = progress) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Advances the offline predicted battery percentage by +1% according to the predicted charging curve,
+     * updates LastSeenScooterState + Widgets + Quick Settings Tile, and triggers the Charging Target Alarm
+     * (`NOTIFICATION` or `ALARM`) if `newSoc >= chargingAlertConfig.value.targetPct`.
+     */
+    fun advanceOfflinePredictedChargingByOnePercent(): Int {
+        val current = _offlineChargingState.value
+        val prevSoc = current.predictedBatteryPct
+            ?: packetParser.telemetryState.value.batteryPercent
+            ?: tripRepository.lastSeenState.value?.batteryPct
+            ?: 40
+        val newSoc = (prevSoc + 1).coerceIn(1, 100)
+        val discStart = current.disconnectStartBatteryPct ?: prevSoc
+        val newRangeKm = ((newSoc * 1.05) * 10.0).roundToInt() / 10.0
+
+        val statusLabel = if (newSoc >= 100) {
+            "Needs Calibration (Predicted 100% Full — Reconnect Scooter to Verify)"
+        } else {
+            "Needs Calibration (Offline Predicted: $newSoc% from $discStart%)"
+        }
+
+        _offlineChargingState.value = current.copy(
+            isOfflinePredicted = true,
+            needsCalibration = true,
+            predictedBatteryPct = newSoc,
+            predictedClusterRangeKm = newRangeKm,
+            nextPctProgress = 0f,
+            disconnectStartBatteryPct = discStart,
+            calibrationStatusLabel = statusLabel
+        )
+
+        val alertCfg = _chargingAlertConfig.value
+        if (alertCfg.isEnabled && !hasTriggeredChargingAlertForSession && newSoc >= alertCfg.targetPct) {
+            hasTriggeredChargingAlertForSession = true
+            triggerChargingAlert(newSoc)
+        }
+
+        val prevLastSeen = tripRepository.lastSeenState.value
+        tripRepository.saveLastSeenState(
+            LastSeenScooterState(
+                timestampMs = System.currentTimeMillis(),
+                batteryPct = newSoc,
+                odometerKm = prevLastSeen?.odometerKm ?: 35925.2,
+                clusterRangeKm = newRangeKm,
+                tripAKm = prevLastSeen?.tripAKm ?: 0.3,
+                tripBKm = prevLastSeen?.tripBKm ?: 1.0,
+                locationName = prevLastSeen?.locationName ?: _detectedLocalityName.value.ifBlank { "Dhantoli" },
+                latitude = prevLastSeen?.latitude ?: 21.1358,
+                longitude = prevLastSeen?.longitude ?: 79.0790,
+                wasCharging = newSoc < 100,
+                vehicleId = prevLastSeen?.vehicleId ?: IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT,
+                needsCalibration = true,
+                isOfflinePredictedCharging = true
+            )
+        )
+
+        com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+        com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+        return newSoc
+    }
+
+    /**
+     * Simulates turning off the scooter while charging so the user can test Offline Predicted Charging,
+     * "Needs Calibration" status, and Target Alarm firing while disconnected.
+     */
+    fun simulateDisconnectWhileCharging(initialSocOverride: Int? = null) {
+        val tele = packetParser.telemetryState.value
+        val startSoc = initialSocOverride
+            ?: tele.batteryPercent
+            ?: _offlineChargingState.value.predictedBatteryPct
+            ?: tripRepository.lastSeenState.value?.batteryPct?.takeIf { it < 95 }
+            ?: 42
+        val startRange = tele.clusterRangeKm ?: (startSoc * 1.05)
+        hasTriggeredChargingAlertForSession = false
+        if (chargingSessionStartMs == null) {
+            chargingSessionStartMs = System.currentTimeMillis() - 240_000L
+            _chargingSessionStartSoc.value = (startSoc - 2).coerceAtLeast(1)
+        }
+        stopReplayModeIfNeeded()
+        closeGattCleanly()
+        commandDispatcher.clearPendingQueueOnDisconnect()
+        packetParser.clearTelemetryOnDisconnect()
+        _rssiDbm.value = null
+        _negotiatedMtu.value = null
+        _isLinkDegraded.value = false
+        _connectionPhase.value = BleConnectionPhase.DISCONNECTED
+        enterOfflinePredictedChargingMode(disconnectSoc = startSoc, disconnectRangeKm = startRange)
+    }
+
+    /**
+     * Manually calibrates the battery percentage against the scooter cluster reading when offline,
+     * computing the interval learning rate and clearing the "Needs Calibration" warning.
+     */
+    fun calibrateOfflineBatterySoc(actualSoc: Int) {
+        val clamped = actualSoc.coerceIn(1, 100)
+        val now = System.currentTimeMillis()
+        val offlineSnap = _offlineChargingState.value
+        val predictedSoc = offlineSnap.predictedBatteryPct
+        val deltaPct = if (predictedSoc != null) clamped - predictedSoc else 0
+        val discStartSoc = offlineSnap.disconnectStartBatteryPct ?: _chargingSessionStartSoc.value
+        val discStartMs = offlineDisconnectTimestampMs
+
+        if (discStartSoc != null && discStartMs != null && clamped > discStartSoc) {
+            val gained = clamped - discStartSoc
+            val elapsedSec = max(60.0, (now - discStartMs) / 1000.0)
+            val measuredRate = (elapsedSec / gained.toDouble()).coerceIn(60.0, 260.0)
+            _liveChargingStepDurationsSec.update { (it + measuredRate).takeLast(10) }
+        }
+
+        offlineChargingTickerJob?.cancel()
+        offlineChargingTickerJob = null
+        offlineDisconnectTimestampMs = null
+
+        commitActiveChargingSession(
+            endSoc = clamped,
+            wasOfflinePredicted = true,
+            calibrationDeltaPct = deltaPct,
+            source = "Calibrated ($clamped% Cluster SoC)"
+        )
+
+        _offlineChargingState.value = OfflineChargingInternalState(
+            isOfflinePredicted = false,
+            needsCalibration = false,
+            predictedBatteryPct = null,
+            predictedClusterRangeKm = null,
+            nextPctProgress = 0f,
+            disconnectStartBatteryPct = null,
+            calibrationStatusLabel = if (predictedSoc != null && deltaPct != 0) {
+                String.format(Locale.US, "Calibrated to %d%% (%+d%% vs Predicted %d%%)", clamped, deltaPct, predictedSoc)
+            } else {
+                "Calibrated to $clamped%"
+            }
+        )
+
+        val prevLastSeen = tripRepository.lastSeenState.value
+        val rangeKm = ((clamped * 1.05) * 10.0).roundToInt() / 10.0
+        tripRepository.saveLastSeenState(
+            LastSeenScooterState(
+                timestampMs = now,
+                batteryPct = clamped,
+                odometerKm = prevLastSeen?.odometerKm ?: 35925.2,
+                clusterRangeKm = rangeKm,
+                tripAKm = prevLastSeen?.tripAKm ?: 0.3,
+                tripBKm = prevLastSeen?.tripBKm ?: 1.0,
+                locationName = prevLastSeen?.locationName ?: _detectedLocalityName.value.ifBlank { "Dhantoli" },
+                latitude = prevLastSeen?.latitude ?: 21.1358,
+                longitude = prevLastSeen?.longitude ?: 79.0790,
+                wasCharging = false,
+                vehicleId = prevLastSeen?.vehicleId ?: IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT,
+                needsCalibration = false,
+                isOfflinePredictedCharging = false
+            )
+        )
+        com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+        com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+    }
+
+    /**
+     * Stops offline predicted charging when the user unplugs the charger while the scooter is still off.
+     * Saves the predicted charging interval while preserving `needsCalibration = true` until calibrated or reconnected.
+     */
+    fun stopOfflinePredictedCharging(saveInterval: Boolean = true) {
+        offlineChargingTickerJob?.cancel()
+        offlineChargingTickerJob = null
+        val current = _offlineChargingState.value
+        val endSoc = current.predictedBatteryPct ?: tripRepository.lastSeenState.value?.batteryPct ?: 50
+        if (saveInterval) {
+            commitActiveChargingSession(
+                endSoc = endSoc,
+                wasOfflinePredicted = true,
+                calibrationDeltaPct = 0,
+                source = "Offline Predicted Session (Unplugged)"
+            )
+        } else {
+            chargingSessionStartMs = null
+            _chargingSessionStartSoc.value = null
+            _liveChargingStepDurationsSec.value = emptyList()
+        }
+        _offlineChargingState.value = current.copy(
+            isOfflinePredicted = false,
+            needsCalibration = true,
+            nextPctProgress = 0f,
+            calibrationStatusLabel = "Needs Calibration (Stopped at Predicted $endSoc% — Connect Scooter to Verify)"
+        )
+        val prevLastSeen = tripRepository.lastSeenState.value
+        if (prevLastSeen != null) {
+            tripRepository.saveLastSeenState(
+                prevLastSeen.copy(
+                    timestampMs = System.currentTimeMillis(),
+                    batteryPct = endSoc,
+                    wasCharging = false,
+                    needsCalibration = true,
+                    isOfflinePredictedCharging = false
+                )
+            )
+        }
+        com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+        com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+    }
+
+    private fun finalizeSessionOnDisconnect(
+        disconnectReason: String,
+        keepOfflineChargingPrediction: Boolean = true
+    ) {
+        val now = System.currentTimeMillis()
+        val tele = packetParser.telemetryState.value
+
+        // 1. If disconnecting while charging is active, transition into Offline Predicted Charging Mode
+        if (tele.isCharging && keepOfflineChargingPrediction) {
+            val soc = tele.batteryPercent ?: lastChargingSocValue ?: 42
+            enterOfflinePredictedChargingMode(
+                disconnectSoc = soc,
+                disconnectRangeKm = tele.clusterRangeKm
+            )
+        } else {
+            // Finalize Charging Session if charging occurred with >= 1% gain
+            val endChgSoc = tele.batteryPercent ?: _offlineChargingState.value.predictedBatteryPct
+            if (endChgSoc != null && chargingSessionStartMs != null) {
+                commitActiveChargingSession(
+                    endSoc = endChgSoc,
+                    wasOfflinePredicted = _offlineChargingState.value.isOfflinePredicted,
+                    calibrationDeltaPct = 0,
+                    source = "Connected BLE Session"
+                )
+            } else {
+                chargingSessionStartMs = null
+                _chargingSessionStartSoc.value = null
+                lastChargingSocValue = null
+                lastChargingSocStepTimestampMs = null
+                firstChargingTickSeen = false
+                _liveChargingStepDurationsSec.value = emptyList()
+            }
+            if (!keepOfflineChargingPrediction) {
+                offlineChargingTickerJob?.cancel()
+                offlineChargingTickerJob = null
+                _offlineChargingState.update {
+                    it.copy(isOfflinePredicted = false, nextPctProgress = 0f)
+                }
+            }
+        }
 
         // 2. Finalize Riding Trip Session (commit if distanceKm >= 0.1 OR durationSec >= 30 OR distanceKm > 0)
         val session = _activeTripSession.value ?: return
@@ -2307,14 +2788,19 @@ class IqubeBleManager(
     }
 
     private fun handleHardwareDisconnect(reason: String) {
+        val wasChargingBeforeDisconnect = packetParser.telemetryState.value.isCharging
         captureLastParkedLocationOnDisconnect()
-        finalizeSessionOnDisconnect(reason)
+        finalizeSessionOnDisconnect(reason, keepOfflineChargingPrediction = true)
         closeGattCleanly()
         commandDispatcher.clearPendingQueueOnDisconnect()
         packetParser.clearTelemetryOnDisconnect()
         _rssiDbm.value = null
         _negotiatedMtu.value = null
-        _linkWarningMessage.value = reason
+        _linkWarningMessage.value = if (wasChargingBeforeDisconnect) {
+            "$reason • Offline Predicted Charging Active (Needs Calibration)"
+        } else {
+            reason
+        }
 
         if (_autoReconnectEnabled.value) {
             scheduleExponentialBackoffReconnect()
@@ -2371,7 +2857,9 @@ class IqubeBleManager(
                         latitude = lat,
                         longitude = lon,
                         wasCharging = tele.isCharging,
-                        vehicleId = tele.vehicleIdString ?: IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT
+                        vehicleId = tele.vehicleIdString ?: IqubeBleSpec.CLUSTER_VEHICLE_ID_DEFAULT,
+                        needsCalibration = tele.isCharging || _offlineChargingState.value.needsCalibration,
+                        isOfflinePredictedCharging = tele.isCharging || _offlineChargingState.value.isOfflinePredicted
                     )
                 )
             }
@@ -2389,14 +2877,23 @@ class IqubeBleManager(
         stopNavigationRouteSimulation()
     }
 
-    fun disconnectBle(userInitiated: Boolean = true) {
+    fun disconnectBle(
+        userInitiated: Boolean = true,
+        keepOfflineChargingPrediction: Boolean = true
+    ) {
+        val wasChargingBeforeDisconnect = packetParser.telemetryState.value.isCharging && keepOfflineChargingPrediction
         if (userInitiated) {
             reconnectJob?.cancel()
             scanJob?.cancel()
-            IqubeBleForegroundService.stopService(context)
+            if (!wasChargingBeforeDisconnect && !_offlineChargingState.value.isOfflinePredicted) {
+                IqubeBleForegroundService.stopService(context)
+            }
         }
         captureLastParkedLocationOnDisconnect()
-        finalizeSessionOnDisconnect(if (userInitiated) "Manual Disconnect" else "BLE Link Lost")
+        finalizeSessionOnDisconnect(
+            disconnectReason = if (userInitiated) "Manual Disconnect" else "BLE Link Lost",
+            keepOfflineChargingPrediction = keepOfflineChargingPrediction
+        )
         stopReplayModeIfNeeded()
         closeGattCleanly()
         commandDispatcher.clearPendingQueueOnDisconnect()

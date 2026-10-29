@@ -103,7 +103,56 @@ class ExampleRobolectricTest {
             GoogleMapsNotificationListenerService.classifyManeuverBitmap(uTurnBmp)
         )
 
-        // 5. Continue Straight (↑): centered vertical shaft + top arrowhead
+        // 5. Right-arrowhead U-Turn (`↷` as in Screenshot_20261029-201804: left vertical stem up, top arch, right vertical stem down with wide arrowhead)
+        val rightUTurnBmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        Canvas(rightUTurnBmp).apply {
+            drawArc(RectF(14f, 10f, 40f, 36f), 180f, 180f, false, strokePaint)
+            drawLine(14f, 23f, 14f, 54f, strokePaint)
+            drawLine(40f, 23f, 40f, 50f, strokePaint)
+            drawLine(30f, 38f, 40f, 52f, strokePaint)
+            drawLine(52f, 38f, 40f, 52f, strokePaint)
+        }
+        assertEquals(
+            "Right-arrowhead U-Turn must classify as U_TURN, never ROUNDABOUT_LEFT (0x45)",
+            TurnTypeConstant.U_TURN,
+            GoogleMapsNotificationListenerService.classifyManeuverBitmap(rightUTurnBmp)
+        )
+
+        // 6. Roundabout Straight (Screenshot_20261029-201708: bottom entry stem + middle roundabout circle with dimmed right arc + top upward arrow)
+        val dimRingPaint = Paint(strokePaint).apply {
+            color = Color.argb(90, 255, 255, 255)
+        }
+        val roundaboutStraightBmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        Canvas(roundaboutStraightBmp).apply {
+            drawLine(32f, 58f, 32f, 44f, strokePaint)
+            drawArc(RectF(18f, 24f, 46f, 46f), 90f, 180f, false, strokePaint)
+            drawArc(RectF(18f, 24f, 46f, 46f), 270f, 180f, false, dimRingPaint)
+            drawLine(32f, 24f, 32f, 10f, strokePaint)
+            drawLine(22f, 20f, 32f, 10f, strokePaint)
+            drawLine(42f, 20f, 32f, 10f, strokePaint)
+        }
+        assertEquals(
+            "Roundabout Straight must classify as ROUNDABOUT, never TURN_SHARPLY_LEFT",
+            TurnTypeConstant.ROUNDABOUT,
+            GoogleMapsNotificationListenerService.classifyManeuverBitmap(roundaboutStraightBmp)
+        )
+
+        // 7. Roundabout Left (Screenshot_20261029-201832: bottom-right entry stem + right roundabout loop + left horizontal exit arrow)
+        val roundaboutLeftBmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        Canvas(roundaboutLeftBmp).apply {
+            drawLine(44f, 58f, 44f, 44f, strokePaint)
+            drawOval(RectF(32f, 22f, 56f, 44f), strokePaint)
+            drawLine(32f, 33f, 10f, 33f, strokePaint)
+            drawLine(20f, 21f, 8f, 33f, strokePaint)
+            drawLine(20f, 45f, 8f, 33f, strokePaint)
+        }
+        assertEquals(
+            "Roundabout Left must classify as ROUNDABOUT_LEFT",
+            TurnTypeConstant.ROUNDABOUT_LEFT,
+            GoogleMapsNotificationListenerService.classifyManeuverBitmap(roundaboutLeftBmp)
+        )
+
+        // 8. Continue Straight (↑): centered vertical shaft + top arrowhead
         val straightBmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
         Canvas(straightBmp).apply {
             drawLine(32f, 54f, 32f, 12f, strokePaint)
@@ -115,7 +164,14 @@ class ExampleRobolectricTest {
             GoogleMapsNotificationListenerService.classifyManeuverBitmap(straightBmp)
         )
 
-        // 6. Slash-separated street name extraction ("Krida Square Rd / Medical College Rd / Untkhana Rd")
+        // 9. Blank/unrecognized icon defaults safely to CONTINUE_STRAIGHT
+        val blankBmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        assertEquals(
+            TurnTypeConstant.CONTINUE_STRAIGHT,
+            GoogleMapsNotificationListenerService.classifyManeuverBitmap(blankBmp)
+        )
+
+        // 10. Slash-separated street name extraction ("Krida Square Rd / Medical College Rd / Untkhana Rd")
         val kridaStreet = GoogleMapsNotificationListenerService.extractTargetStreetOrLocation(
             title = "120 m",
             text = "Krida Square Rd / Medical College Rd / Untkhana Rd",
@@ -123,6 +179,15 @@ class ExampleRobolectricTest {
             extraStrings = listOf("Exit navigation")
         )
         assertEquals("Krida Sq Rd", kridaStreet)
+
+        // 11. ETA timestamp filtering ("20:19 ETA", "14:44 ETA", "2019 ETA", "1444 ETA") & swapped title/text fields
+        val swappedStreet = GoogleMapsNotificationListenerService.extractTargetStreetOrLocation(
+            title = "towards Medical Rd",
+            text = "60 m",
+            subText = "2 min · 500 m · 20:19 ETA",
+            extraStrings = listOf("20:19 ETA", "2019 ETA", "1444 ETA", "now", "Exit navigation")
+        )
+        assertEquals("Medical Rd", swappedStreet)
     }
 
     @Test
@@ -150,7 +215,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify ManeuverExtractor two-stage pipeline, 27-command catalog, TripSummary, and 3s throttling`() {
+    fun `verify ManeuverExtractor two-stage pipeline, 27-command catalog, TripSummary, and 1s throttling`() {
         assertEquals(27, com.example.ble.ManeuverExtractor.COMMAND_CATALOG.size)
 
         // Stage 1 Regex Tests across the core actions & TripSummary middle-dot parsing
@@ -220,7 +285,30 @@ class ExampleRobolectricTest {
         val reroute = com.example.ble.ManeuverExtractor.extract("", "Rerouting...")
         assertEquals(com.example.ble.ManeuverAction.REROUTE, reroute.action)
 
-        // Stage 2 (24x24 Visual Icon Fallback when EXTRA_TEXT has only a street name "MG Road"):
+        // Stage 2 (Visual Icon Fallback when EXTRA_TEXT has only a street name like "Munje Chowk" or "Ghat Rd"):
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        val munjeRightBmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        Canvas(munjeRightBmp).apply {
+            drawLine(18f, 54f, 18f, 22f, strokePaint)
+            drawLine(18f, 22f, 48f, 22f, strokePaint)
+            drawLine(36f, 10f, 50f, 22f, strokePaint)
+            drawLine(36f, 34f, 50f, 22f, strokePaint)
+        }
+        val munjeRightCmd = com.example.ble.ManeuverExtractor.extract(
+            title = "80 m",
+            text = "Munje Chowk",
+            largeIconBitmap = munjeRightBmp
+        )
+        assertEquals(com.example.ble.ManeuverAction.TURN, munjeRightCmd.action)
+        assertEquals(com.example.ble.Direction.RIGHT, munjeRightCmd.direction)
+        assertEquals(com.example.ble.TurnModifier.NORMAL, munjeRightCmd.modifier)
+
         val fillPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
 
         // Left-heavy (>62% pixels on left side) -> Direction.LEFT
@@ -239,7 +327,7 @@ class ExampleRobolectricTest {
         Canvas(right24).drawRect(13f, 4f, 22f, 20f, fillPaint)
         val stage2Right = com.example.ble.ManeuverExtractor.extract(
             title = "200 m",
-            text = "MG Road",
+            text = "Ghat Rd",
             largeIconBitmap = right24
         )
         assertEquals(com.example.ble.ManeuverAction.TURN, stage2Right.action)
@@ -266,7 +354,7 @@ class ExampleRobolectricTest {
         assertEquals(com.example.ble.ManeuverAction.CONTINUE_STRAIGHT, stage2Straight.action)
         assertEquals(com.example.ble.Direction.STRAIGHT, stage2Straight.direction)
 
-        // Requirement 3: Verify 3-second countdown throttling vs immediate high-priority maneuver change
+        // Requirement: Verify 1-second (1000ms) default countdown throttling vs immediate high-priority maneuver change
         GoogleMapsNotificationListenerService.handleNavigationStopped("Reset for test")
         val beforeCount = GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount
 
@@ -280,12 +368,11 @@ class ExampleRobolectricTest {
                 subText = "5 min · 1.2 km · 10:15 AM",
                 bigText = ""
             ),
-            nowMs = 1_000L,
-            countdownThrottleMs = 3_000L
+            nowMs = 1_000L
         )
         assertEquals(beforeCount + 1, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
 
-        // T=2000ms (+1.0s < 3.0s): Same maneuver & street, distance ticks to 280m -> Throttled!
+        // T=1500ms (+0.5s < 1.0s): Same maneuver & street, distance ticks to 280m -> Throttled!
         GoogleMapsNotificationListenerService.processExtractedNotificationSnapshot(
             isOngoing = true,
             category = android.app.Notification.CATEGORY_NAVIGATION,
@@ -295,12 +382,11 @@ class ExampleRobolectricTest {
                 subText = "5 min · 1.2 km · 10:15 AM",
                 bigText = ""
             ),
-            nowMs = 2_000L,
-            countdownThrottleMs = 3_000L
+            nowMs = 1_500L
         )
         assertEquals(beforeCount + 1, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
 
-        // T=4500ms (+3.5s >= 3.0s): Routine countdown tick to 220m after 3s window -> Dispatched (#2)
+        // T=2100ms (+1.1s >= 1.0s): Routine countdown tick to 220m after 1s window -> Dispatched (#2)
         GoogleMapsNotificationListenerService.processExtractedNotificationSnapshot(
             isOngoing = true,
             category = android.app.Notification.CATEGORY_NAVIGATION,
@@ -310,12 +396,11 @@ class ExampleRobolectricTest {
                 subText = "5 min · 1.1 km · 10:15 AM",
                 bigText = ""
             ),
-            nowMs = 4_500L,
-            countdownThrottleMs = 3_000L
+            nowMs = 2_100L
         )
         assertEquals(beforeCount + 2, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
 
-        // T=5000ms (+0.5s < 3.0s): High-priority direction change to Turn Right -> Immediate dispatch (#3)!
+        // T=2400ms (+0.3s < 1.0s): High-priority direction change to Turn Right -> Immediate dispatch (#3)!
         GoogleMapsNotificationListenerService.processExtractedNotificationSnapshot(
             isOngoing = true,
             category = android.app.Notification.CATEGORY_NAVIGATION,
@@ -325,11 +410,76 @@ class ExampleRobolectricTest {
                 subText = "4 min · 0.9 km · 10:14 AM",
                 bigText = ""
             ),
-            nowMs = 5_000L,
-            countdownThrottleMs = 3_000L
+            nowMs = 2_400L
         )
         assertEquals(beforeCount + 3, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
     }
+
+    @Test
+    fun `verify offline predicted charging progression, needs calibration status, charging alarm while disconnected, and interval analysis`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val bleManager = IqubeBleManager(context)
+
+        // 1. Configure charging alert for 44%
+        bleManager.setChargingAlertEnabled(true)
+        bleManager.setChargingAlertTargetPct(44)
+
+        // 2. Log a sample historical charging session (38% -> 82%) and verify interval learning
+        bleManager.tripRepository.clearAllChargingSessions()
+        bleManager.tripRepository.logSampleChargingSession()
+        val sessions = bleManager.tripRepository.savedChargingSessions.value
+        assertEquals(1, sessions.size)
+        assertTrue(sessions.first().cc0To80PctGained > 0)
+        assertTrue(sessions.first().estimatedKwhAdded > 1.0)
+
+        // 3. Simulate disconnecting while charging at 42% (e.g. scooter turned off while plugged in)
+        bleManager.simulateDisconnectWhileCharging()
+
+        val offlineState = com.example.ble.TrueRangeAndTripRepository.computeChargingMonitorState(
+            isCharging = true,
+            currentBatteryPct = 42,
+            clusterRangeKm = 44.1,
+            sessionStartBatteryPct = 40,
+            liveStepDurationsSec = emptyList(),
+            savedChargingSessions = sessions,
+            isDisconnectedPredicted = true,
+            needsCalibration = true,
+            calibrationStatusLabel = "⚠️ Needs Calibration (Predicted while Disconnected)",
+            disconnectStartBatteryPct = 42
+        )
+        assertTrue("Charging section must remain active when disconnected while charging", offlineState.isCharging)
+        assertTrue("Must flag isDisconnectedPredicted", offlineState.isDisconnectedPredicted)
+        assertTrue("Must flag needsCalibration", offlineState.needsCalibration)
+        assertTrue(
+            "Calibration label must mention Needs Calibration",
+            offlineState.calibrationStatusLabel.contains("Needs Calibration")
+        )
+        assertTrue("True 0->80% seconds must be positive", offlineState.true0To80TotalSeconds > 0)
+        assertTrue("True 0->100% seconds must be greater than 0->80%", offlineState.true0To100TotalSeconds > offlineState.true0To80TotalSeconds)
+        assertTrue("Charging insight text must be populated", offlineState.chargingInsightText.isNotBlank())
+
+        // 4. Advance offline predicted charging from 42% -> 43% -> 44% and verify target alarm triggers even while disconnected
+        bleManager.simulateLiveOnePercentChargingStep() // 42% -> 43%
+        bleManager.simulateLiveOnePercentChargingStep() // 43% -> 44% (reaches targetPct = 44%)
+        assertEquals(
+            "Charging target alert must trigger at 44% even while scooter is turned off / disconnected",
+            44,
+            bleManager.chargingAlertConfig.value.lastAlertedPct
+        )
+        assertEquals(
+            "LastSeenState must reflect predicted 44% and needsCalibration",
+            44,
+            bleManager.lastSeenState.value?.batteryPct
+        )
+        assertEquals(true, bleManager.lastSeenState.value?.needsCalibration)
+
+        // 5. Calibrate battery SoC manually to 45% and verify calibration clears needsCalibration flag
+        bleManager.calibrateOfflineBatterySoc(45)
+        assertEquals(45, bleManager.lastSeenState.value?.batteryPct)
+        bleManager.stopOfflinePredictedCharging()
+        assertEquals(false, bleManager.lastSeenState.value?.isOfflinePredictedCharging)
+    }
 }
+
 
 

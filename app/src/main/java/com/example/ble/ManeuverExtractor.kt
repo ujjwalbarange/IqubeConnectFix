@@ -759,21 +759,22 @@ object ManeuverExtractor {
         val topRatio = topPixels.toFloat() / totalForeground
         val bottomRatio = bottomPixels.toFloat() / totalForeground
 
-        // 1. Explicit 24x24 Pixel-Density Thresholds from Parsing_Rules:
-        if (leftRatio > 0.62f) {
-            val spec = specForId(1)
-            return TurnCommand(
-                action = ManeuverAction.TURN,
-                direction = Direction.LEFT,
-                modifier = TurnModifier.NORMAL,
+        // 1. First inspect normalized arrow geometry (stem-to-arrowhead horizontal shift, U-turn hooks, and roundabout circles)
+        // so that stemmed icons (e.g. Turn Right `↱` whose vertical stem is on the left and arrowhead is on the right)
+        // are never inverted by raw uncropped half-canvas pixel counts:
+        val classifiedTurn = GoogleMapsNotificationListenerService.classifyManeuverBitmap(bitmap)
+        if (classifiedTurn != null && classifiedTurn != TurnTypeConstant.CONTINUE_STRAIGHT) {
+            return turnCommandFromTurnTypeConstant(
+                turnType = classifiedTurn,
                 distanceRemaining = distanceRemaining,
                 rawInstruction = rawInstruction,
                 tripSummary = tripSummary,
-                commandId = 1,
-                targetStreet = targetStreet,
-                downstreamBehavior = spec?.downstreamBehavior.orEmpty()
+                targetStreet = targetStreet
             )
         }
+
+        // 2. Explicit 24x24 Pixel-Density Thresholds from Parsing_Rules (for unstemmed/half-canvas icons):
+        // Active pixels on the right half (> 62%) -> Direction.RIGHT
         if (rightRatio > 0.62f) {
             val spec = specForId(2)
             return TurnCommand(
@@ -788,6 +789,22 @@ object ManeuverExtractor {
                 downstreamBehavior = spec?.downstreamBehavior.orEmpty()
             )
         }
+        // Active pixels on the left half (> 62%) -> Direction.LEFT
+        if (leftRatio > 0.62f) {
+            val spec = specForId(1)
+            return TurnCommand(
+                action = ManeuverAction.TURN,
+                direction = Direction.LEFT,
+                modifier = TurnModifier.NORMAL,
+                distanceRemaining = distanceRemaining,
+                rawInstruction = rawInstruction,
+                tripSummary = tripSummary,
+                commandId = 1,
+                targetStreet = targetStreet,
+                downstreamBehavior = spec?.downstreamBehavior.orEmpty()
+            )
+        }
+        // Bottom-heavy density -> ManeuverAction.U_TURN
         if (bottomRatio > 0.58f && leftRatio in 0.35f..0.65f) {
             val spec = specForId(8)
             return TurnCommand(
@@ -803,36 +820,20 @@ object ManeuverExtractor {
             )
         }
 
-        // 2. For centered vector icons (where the shaft and arrowhead balance horizontal pixel count within 38%..62%),
-        // consult the normalized bounding-box & hollow-loop classifier before defaulting to balanced top-heavy STRAIGHT:
-        val classifiedTurn = GoogleMapsNotificationListenerService.classifyManeuverBitmap(bitmap)
-        if (classifiedTurn != null && classifiedTurn != TurnTypeConstant.CONTINUE_STRAIGHT) {
-            return turnCommandFromTurnTypeConstant(
-                turnType = classifiedTurn,
-                distanceRemaining = distanceRemaining,
-                rawInstruction = rawInstruction,
-                tripSummary = tripSummary,
-                targetStreet = targetStreet
-            )
-        }
-
-        // 3. Balanced top-heavy density -> Direction.STRAIGHT
-        if (topRatio >= bottomRatio || classifiedTurn == TurnTypeConstant.CONTINUE_STRAIGHT) {
-            val spec = specForId(3)
-            return TurnCommand(
-                action = ManeuverAction.CONTINUE_STRAIGHT,
-                direction = Direction.STRAIGHT,
-                modifier = TurnModifier.NONE,
-                distanceRemaining = distanceRemaining,
-                rawInstruction = rawInstruction,
-                tripSummary = tripSummary,
-                commandId = 3,
-                targetStreet = targetStreet,
-                downstreamBehavior = spec?.downstreamBehavior.orEmpty()
-            )
-        }
-
-        return null
+        // 3. Safe Default Fallback: If an icon cannot be confidently classified as a turn/U-turn/roundabout,
+        // always default to Continue Straight (never default to Left turn).
+        val spec = specForId(3)
+        return TurnCommand(
+            action = ManeuverAction.CONTINUE_STRAIGHT,
+            direction = Direction.STRAIGHT,
+            modifier = TurnModifier.NONE,
+            distanceRemaining = distanceRemaining,
+            rawInstruction = rawInstruction,
+            tripSummary = tripSummary,
+            commandId = 3,
+            targetStreet = targetStreet,
+            downstreamBehavior = spec?.downstreamBehavior.orEmpty()
+        )
     }
 
     /**

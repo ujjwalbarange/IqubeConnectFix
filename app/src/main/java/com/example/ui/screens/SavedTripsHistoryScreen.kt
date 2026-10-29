@@ -52,7 +52,9 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.model.ActiveTripSession
+import com.example.model.ChargingMonitorState
 import com.example.model.RideMode
+import com.example.model.SavedChargingSession
 import com.example.model.SavedTripRecord
 import com.example.model.TelemetryState
 import com.example.model.TrueRangeCalculation
@@ -69,17 +71,23 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SavedTripsHistoryScreen(
     savedTrips: List<SavedTripRecord>,
+    savedChargingSessions: List<SavedChargingSession> = emptyList(),
+    chargingMonitor: ChargingMonitorState = ChargingMonitorState(),
     activeTripSession: ActiveTripSession?,
     telemetry: TelemetryState,
     trueRange: TrueRangeCalculation,
     onLogSampleTripClick: () -> Unit,
     onDeleteTripClick: (String) -> Unit,
     onClearAllTripsClick: () -> Unit,
+    onLogSampleChargingSessionClick: () -> Unit = {},
+    onDeleteChargingSessionClick: (String) -> Unit = {},
+    onClearAllChargingSessionsClick: () -> Unit = {},
     onExportCsv: () -> String,
     onExportJson: () -> String,
     modifier: Modifier = Modifier
@@ -90,6 +98,7 @@ fun SavedTripsHistoryScreen(
     var exportedPreview by remember { mutableStateOf<String?>(null) }
     var exportedFormatLabel by remember { mutableStateOf("") }
     var selectedTripForDetails by remember { mutableStateOf<SavedTripRecord?>(null) }
+    var selectedChargeForDetails by remember { mutableStateOf<SavedChargingSession?>(null) }
 
     if (selectedTripForDetails != null) {
         TripDetailsDialog(
@@ -98,6 +107,18 @@ fun SavedTripsHistoryScreen(
             onDeleteClick = {
                 onDeleteTripClick(selectedTripForDetails!!.id)
                 selectedTripForDetails = null
+            }
+        )
+    }
+
+    if (selectedChargeForDetails != null) {
+        ChargingSessionDetailsDialog(
+            session = selectedChargeForDetails!!,
+            chargingMonitor = chargingMonitor,
+            onDismiss = { selectedChargeForDetails = null },
+            onDeleteClick = {
+                onDeleteChargingSessionClick(selectedChargeForDetails!!.id)
+                selectedChargeForDetails = null
             }
         )
     }
@@ -166,7 +187,7 @@ fun SavedTripsHistoryScreen(
                             .background(SlateCardElevated)
                             .padding(10.dp)
                     ) {
-                        Text("POWER RATE (0.75x)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Text("POWER RATE (LEARNED)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                         Text(
                             text = String.format(Locale.US, "%.2f km / 1%%", trueRange.powerKmPerPct),
                             style = MaterialTheme.typography.titleLarge,
@@ -176,6 +197,126 @@ fun SavedTripsHistoryScreen(
                             text = trueRange.truePowerRangeKm?.let { "Range: $it km" } ?: "100% = ${(trueRange.powerKmPerPct * 100).toInt()} km",
                             style = MaterialTheme.typography.labelSmall,
                             color = TextSecondary
+                        )
+                    }
+                }
+            }
+
+            // 1B. True Charging Time & Interval Analysis Engine Card (Like Trips)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(SlateSurface)
+                    .border(1.dp, AmberWarning.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "⚡ TRUE CHARGING TIME & INTERVAL LEARNING ENGINE",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = AmberWarning
+                    )
+                    if (savedChargingSessions.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = onClearAllChargingSessionsClick,
+                            modifier = Modifier.testTag("clear_all_charging_sessions_button")
+                        ) {
+                            Text("Clear Charges", color = EnergeticCoral, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+
+                Text(
+                    text = chargingMonitor.predictionModeLabel,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val true0To80Hrs = chargingMonitor.true0To80TotalSeconds / 3600
+                    val true0To80Mins = (chargingMonitor.true0To80TotalSeconds % 3600) / 60
+                    val true0To100Hrs = chargingMonitor.true0To100TotalSeconds / 3600
+                    val true0To100Mins = (chargingMonitor.true0To100TotalSeconds % 3600) / 60
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(SlateCardElevated)
+                            .padding(10.dp)
+                    ) {
+                        Text("BULK CC (0→80%)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Text(
+                            text = "${true0To80Hrs}h ${true0To80Mins}m",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = NeonMint
+                        )
+                        Text(
+                            text = "${chargingMonitor.learned0To80SecPerPct.roundToInt()}s / 1% SoC",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(SlateCardElevated)
+                            .padding(10.dp)
+                    ) {
+                        Text("FULL CC+CV (0→100%)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Text(
+                            text = "${true0To100Hrs}h ${true0To100Mins}m",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = AmberWarning
+                        )
+                        Text(
+                            text = "80–100% Taper: ${chargingMonitor.learned80To100SecPerPct.roundToInt()}s/1%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                    }
+                }
+
+                Text(
+                    text = chargingMonitor.chargingInsightText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+
+                Button(
+                    onClick = onLogSampleChargingSessionClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = AmberWarning, contentColor = SlateSurface),
+                    modifier = Modifier.testTag("log_sample_charging_session_button")
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Log Sample Charge", modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Log Sample Charge Interval (38% → 82%)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                }
+
+                if (savedChargingSessions.isNotEmpty()) {
+                    Text(
+                        text = "RECORDED CHARGING INTERVALS (${savedChargingSessions.size}) — TAP FOR INSIGHTS",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    savedChargingSessions.forEach { session ->
+                        SavedChargingSessionItemCard(
+                            session = session,
+                            onSessionClick = { selectedChargeForDetails = session },
+                            onDeleteClick = { onDeleteChargingSessionClick(session.id) }
                         )
                     }
                 }
@@ -363,6 +504,227 @@ fun SavedTripsHistoryScreen(
             }
         }
     }
+}
+
+@Composable
+private fun SavedChargingSessionItemCard(
+    session: SavedChargingSession,
+    onSessionClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    val dateFmt = remember(session.startTimeMs) {
+        SimpleDateFormat("dd MMM yyyy • HH:mm", Locale.US).format(Date(session.startTimeMs))
+    }
+    val durationMin = session.durationSeconds / 60
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(SlateCardElevated)
+            .border(1.dp, SlateBorder, RoundedCornerShape(12.dp))
+            .clickable { onSessionClick() }
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "⚡ ${session.startPct}% → ${session.endPct}% (+${session.pctGained}% SoC)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = NeonMint
+                )
+                Text(
+                    text = "$dateFmt • ${durationMin}m • ${session.sessionSource}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
+            }
+            IconButton(onClick = onDeleteClick) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Delete Charging Session",
+                    tint = EnergeticCoral
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Pace: ${session.avgSecondsPerPct.roundToInt()}s / 1%",
+                style = MaterialTheme.typography.labelSmall,
+                color = AmberWarning
+            )
+            Text(
+                text = String.format(Locale.US, "+%.2f kWh", session.estimatedKwhAdded),
+                style = MaterialTheme.typography.labelSmall,
+                color = ElectricCyan
+            )
+            Text(
+                text = String.format(Locale.US, "+%.1f km Range", session.trueEcoRangeAddedKm),
+                style = MaterialTheme.typography.labelSmall,
+                color = NeonMint
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChargingSessionDetailsDialog(
+    session: SavedChargingSession,
+    chargingMonitor: ChargingMonitorState,
+    onDismiss: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    val dateFmt = remember(session.startTimeMs) {
+        SimpleDateFormat("dd MMMM yyyy, hh:mm:ss a", Locale.US).format(Date(session.startTimeMs))
+    }
+    val durationMin = session.durationSeconds / 60
+    val durationSecRem = session.durationSeconds % 60
+    val projected0To80Min = (session.cc0To80SecondsPerPct * 80.0 / 60.0).roundToInt()
+    val projected0To100Min = ((session.cc0To80SecondsPerPct * 80.0 + session.cv80To100SecondsPerPct * 20.0) / 60.0).roundToInt()
+    val calDelta = session.calibrationDeltaPct ?: 0
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Charging Interval & True Time",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SlateCardElevated)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("INTERVAL SUMMARY", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = AmberWarning)
+                    Text(
+                        text = "⚡ SoC Gained: ${session.startPct}% → ${session.endPct}% (+${session.pctGained}%)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonMint
+                    )
+                    Text("📅 Started: $dateFmt", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    Text("⏱ Duration: ${durationMin}m ${durationSecRem}s • Avg Pace: ${session.avgSecondsPerPct.roundToInt()}s / 1%", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    Text("🔌 Source: ${session.sessionSource}", style = MaterialTheme.typography.labelSmall, color = ElectricCyan)
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SlateCardElevated)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("CC BULK (0–80%) VS CV TAPER (80–100%) ANALYSIS", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = ElectricCyan)
+                    Text(
+                        text = "• Bulk CC (0–80%): +${session.cc0To80PctGained}% at ${session.cc0To80SecondsPerPct.roundToInt()}s / 1%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NeonMint
+                    )
+                    Text(
+                        text = "• Taper CV (80–100%): +${session.cv80To100PctGained}% at ${session.cv80To100SecondsPerPct.roundToInt()}s / 1%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AmberWarning
+                    )
+                    Text(
+                        text = "• Projected True 0→80% Time: ${projected0To80Min / 60}h ${projected0To80Min % 60}m",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "• Projected True 0→100% Time: ${projected0To100Min / 60}h ${projected0To100Min % 60}m",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SlateCardElevated)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("ENERGY & TRUE RANGE ADDED", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = NeonMint)
+                    Text(
+                        text = String.format(Locale.US, "🔋 Pack Energy Added: +%.2f kWh (3.4 kWh pack)", session.estimatedKwhAdded),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = String.format(Locale.US, "🛣 True Eco Range Added: +%.1f km", session.trueEcoRangeAddedKm),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NeonMint
+                    )
+                    if (session.wasOfflinePredicted) {
+                        Text(
+                            text = "⚠️ Included Offline Predicted Charging (Calibration Delta: ${if (calDelta >= 0) "+" else ""}$calDelta%)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmberWarning
+                        )
+                    }
+                    Text(
+                        text = chargingMonitor.chargingInsightText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan)
+            ) {
+                Text("Close", color = androidx.compose.ui.graphics.Color.Black, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDeleteClick,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = EnergeticCoral)
+            ) {
+                Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Delete Interval")
+            }
+        },
+        containerColor = SlateSurface,
+        shape = RoundedCornerShape(20.dp)
+    )
 }
 
 @Composable
