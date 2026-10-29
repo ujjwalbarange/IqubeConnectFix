@@ -1,0 +1,31 @@
+Google Maps Turn-by-Turn Navigation: Comprehensive Command Catalog,,,,,,,,
+"Complete mapping of Google Maps notification text variations, visual arrow types, standard enum actions, and downstream app execution commands.",,,,,,,,
+,,,,,,,,
+Cmd ID,Maneuver Category,Sample Maps Text (EXTRA_TEXT),Arrow Icon (EXTRA_LARGE_ICON),Standard Action,Direction,Modifier,Parameters / Target,Downstream App Command & Behavior
+1,Basic Turns,Turn left onto MG Road / Left on Main St,90° arrow pointing left,TURN,LEFT,NORMAL,Street name,Display Left arrow; Audio prompt 'Turn left'; Haptic 2 short pulses
+2,Basic Turns,Turn right onto 100 Feet Rd / Right on 5th Ave,90° arrow pointing right,TURN,RIGHT,NORMAL,Street name,Display Right arrow; Audio prompt 'Turn right'; Haptic 2 short pulses
+3,Basic Turns,Continue straight onto Outer Ring Rd / Straight,Vertical arrow pointing straight up,CONTINUE_STRAIGHT,STRAIGHT,NONE,Street name,Display Straight arrow; Confirm route progress; Silent update
+4,Curved Turns,Slight left onto Flyover / Bear left,45° angled arrow pointing top-left,TURN,LEFT,SLIGHT,Street / Ramp name,Display Slight-Left arrow; Audio 'Keep slight left'; Gentle single pulse
+5,Curved Turns,Slight right toward IT Park / Bear right,45° angled arrow pointing top-right,TURN,RIGHT,SLIGHT,Street / Ramp name,Display Slight-Right arrow; Audio 'Keep slight right'; Gentle single pulse
+6,Curved Turns,Sharp left onto Old Post Office Rd,Hairpin arrow curving hard left (>120°),TURN,LEFT,SHARP,Street name,Display Sharp-Left warning; Audio 'Sharp left turn ahead'; Strong double pulse
+7,Curved Turns,Sharp right onto Service Rd,Hairpin arrow curving hard right (>120°),TURN,RIGHT,SHARP,Street name,Display Sharp-Right warning; Audio 'Sharp right turn ahead'; Strong double pulse
+8,U-Turns,Make a U-turn / Make a U-turn onto NH-44,180° loop arrow curving counter-clockwise,U_TURN,LEFT,U_TURN,Target street,Display U-Turn icon; Audio 'Make a U-turn when safe'; Urgent pattern
+9,U-Turns,Make a U-turn at the traffic light,180° loop arrow curving clockwise,U_TURN,RIGHT,U_TURN,Target street,Display U-Turn icon; Audio 'Make a U-turn when safe'; Urgent pattern
+10,Lanes & Forks,Keep left to stay on Express Highway,"Two road paths diverging, arrow on left path",KEEP,LEFT,NONE,Route continuation,Highlight left lane guide; Audio 'Keep left'; Single haptic tick
+11,Lanes & Forks,Keep right toward City Center,"Two road paths diverging, arrow on right path",KEEP,RIGHT,NONE,Route continuation,Highlight right lane guide; Audio 'Keep right'; Single haptic tick
+12,Lanes & Forks,"At the fork, stay left toward Airport",Y-junction fork with left branch highlighted,FORK,LEFT,NONE,Destination split,Show fork split; Audio 'Stay left at the fork'; Alert driver
+13,Lanes & Forks,"At the fork, keep right for Downtown",Y-junction fork with right branch highlighted,FORK,RIGHT,NONE,Destination split,Show fork split; Audio 'Stay right at the fork'; Alert driver
+14,Highway & Ramps,Take the ramp onto I-95 North / Take entry ramp,Angled curved ramp entering highway,RAMP,RIGHT,NONE,Highway identifier,Display Ramp icon; Audio 'Take the on-ramp'; Speed adaptation alert
+15,Highway & Ramps,Take exit 14B toward Airport Rd,Diverging ramp leaving highway with exit sign,HIGHWAY_EXIT,RIGHT,NONE,Exit Number: '14B',Display Exit Badge [14B]; Countdown distance; Audio prompt
+16,Highway & Ramps,Take the exit on the left toward Ring Rd,Diverging ramp on left side,HIGHWAY_EXIT,LEFT,NONE,Target highway,Display Exit Left indicator; Warning for unusual left exit
+17,Highway & Ramps,Merge onto Central Expressway / Merge,Lane merging into main traffic flow,MERGE,RIGHT,NONE,Highway name,Display Merge indicator; Audio 'Merge onto highway'; Traffic caution
+18,Roundabouts,"At the roundabout, take the 1st exit onto Elm St",Circular roundabout icon with 1st exit arrow,ROUNDABOUT,NONE,NONE,Exit Index: 1,Display Roundabout [1]; Audio 'Take the first exit'; Prepare turning
+19,Roundabouts,"At the roundabout, take the 2nd exit onto Broadway",Circular roundabout icon with 2nd exit arrow,ROUNDABOUT,NONE,NONE,Exit Index: 2,Display Roundabout [2]; Audio 'Take the second exit'; Prepare turning
+20,Roundabouts,"At the roundabout, take the 3rd exit onto Grand Ave",Circular roundabout icon with 3rd exit arrow,ROUNDABOUT,NONE,NONE,Exit Index: 3,Display Roundabout [3]; Audio 'Take the third exit'; Prepare turning
+21,Roundabouts,"At the roundabout, take the 4th exit / 5th exit",Circular roundabout icon with 4th/5th exit arrow,ROUNDABOUT,NONE,NONE,Exit Index: 4+,Display Roundabout [4+]; Count exits carefully
+22,State & Arrival,Head north on 1st Main Rd / Head east,Compass heading arrow or straight line,CONTINUE_STRAIGHT,STRAIGHT,NONE,Initial Direction,Initialize navigation session; Calibrate compass/heading
+23,State & Arrival,You have arrived / You've arrived at your destination,Checkered flag or destination pin icon,ARRIVE,NONE,NONE,Destination point,Display Arrival screen; Play victory/finish chime; Complete trip log
+24,State & Arrival,Your destination is on the left,Pin icon with left-side arrival badge,ARRIVE,LEFT,NONE,Side of street: Left,Highlight destination on left; Audio 'Destination is on the left'
+25,State & Arrival,Your destination is on the right,Pin icon with right-side arrival badge,ARRIVE,RIGHT,NONE,Side of street: Right,Highlight destination on right; Audio 'Destination is on the right'
+26,State & Arrival,Rerouting... / Finding best route...,Recalculating icon / rotating circle,REROUTE,NONE,NONE,Route computation,Pause turn guidance; Display 'Rerouting' status; Inhibit turn audio
+27,Special Transit,Take the ferry to South Island / Board ferry,Boat / Ferry transit icon,FERRY,NONE,NONE,Ferry route name,Display Ferry boarding icon; Hold updates until disembarkation

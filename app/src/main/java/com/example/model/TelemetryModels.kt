@@ -240,7 +240,8 @@ data class ParsedGoogleMapsNavigation(
     val rawTitle: String = "",
     val rawText: String = "",
     val rawSubText: String = "",
-    val streetOrLocationName: String = ""
+    val streetOrLocationName: String = "",
+    val turnCommand: com.example.ble.TurnCommand? = null
 ) {
     val totalEtaMinutes: Int
         get() = (etaHours.coerceAtLeast(0) * 60) + etaMinutes.coerceIn(0, 59)
@@ -254,8 +255,10 @@ data class GoogleMapsListenerState(
     val isAutoForwardEnabled: Boolean = true,
     val isActiveNavigationOngoing: Boolean = false,
     val lastParsedNavigation: ParsedGoogleMapsNavigation? = null,
+    val lastTurnCommand: com.example.ble.TurnCommand? = null,
     val dispatchedUpdateCount: Int = 0,
     val ignoredDuplicateCount: Int = 0,
+    val throttledCountdownCount: Int = 0,
     val filteredNonNavCount: Int = 0,
     val lastStatusMessage: String = "Waiting for Google Maps ongoing navigation...",
     val lastUpdatedAtMs: Long? = null

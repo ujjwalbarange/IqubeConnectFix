@@ -1,6 +1,7 @@
 package com.example.ble
 
 import android.app.Notification
+import android.content.ComponentName
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
@@ -80,6 +82,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
         runCatching {
             super.onListenerDisconnected()
             updateListenerConnectionState(connected = false)
+            requestRebind(ComponentName(applicationContext, GoogleMapsNotificationListenerService::class.java))
         }
     }
 
@@ -142,8 +145,21 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
         )
     }
 
+    data class NotificationExtrasSnapshot(
+        val title: String,
+        val text: String,
+        val subText: String,
+        val bigText: String,
+        val tickerText: String = "",
+        val allExtraStrings: List<String> = emptyList(),
+        val iconResourceName: String? = null,
+        val iconShapeDirection: TurnTypeConstant? = null,
+        val largeIconBitmap: Bitmap? = null
+    )
+
     companion object {
         const val GOOGLE_MAPS_PACKAGE = "com.google.android.apps.maps"
+        const val COUNTDOWN_THROTTLE_MS = 3_000L
 
         private val dispatchScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -153,21 +169,15 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val etaHours: Int,
             val etaMinutes: Int,
             val isDestinationArrived: Boolean,
-            val streetOrLocationName: String = ""
-        )
-
-        internal data class NotificationExtrasSnapshot(
-            val title: String,
-            val text: String,
-            val subText: String,
-            val bigText: String,
-            val tickerText: String = "",
-            val allExtraStrings: List<String> = emptyList(),
-            val iconResourceName: String? = null,
-            val iconShapeDirection: TurnTypeConstant? = null
+            val streetOrLocationName: String = "",
+            val action: ManeuverAction = ManeuverAction.UNKNOWN,
+            val modifier: TurnModifier = TurnModifier.NONE,
+            val roundaboutExit: Int? = null,
+            val exitNumber: String? = null
         )
 
         private val lastDispatchedKey = AtomicReference<DeduplicationKey?>(null)
+        private val lastDispatchedAtMs = AtomicLong(0L)
         private val registeredHandlerRef = AtomicReference<VehicleNavigationHandler?>(null)
 
         private val _listenerState = MutableStateFlow(GoogleMapsListenerState())
@@ -415,7 +425,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 tickerText = tickerText,
                 allExtraStrings = allExtraStrings,
                 iconResourceName = iconResName,
-                iconShapeDirection = iconShapeDir
+                iconShapeDirection = iconShapeDir,
+                largeIconBitmap = candidateBitmaps.firstOrNull()
             )
         }
 
@@ -1010,7 +1021,9 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
         internal fun processExtractedNotificationSnapshot(
             isOngoing: Boolean,
             category: String?,
-            snapshot: NotificationExtrasSnapshot
+            snapshot: NotificationExtrasSnapshot,
+            nowMs: Long = System.currentTimeMillis(),
+            countdownThrottleMs: Long = COUNTDOWN_THROTTLE_MS
         ) {
             // Requirement 1: Process only ongoing navigation notifications
             if (!isOngoing) {
@@ -1046,6 +1059,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 extraStrings = snapshot.allExtraStrings,
                 iconResourceName = snapshot.iconResourceName,
                 iconShapeDirection = snapshot.iconShapeDirection,
+                largeIconBitmap = snapshot.largeIconBitmap,
                 fallbackPreviousDirection = previousKey?.direction
             )
 
@@ -1059,32 +1073,61 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 return
             }
 
-            // Requirement 5: Deduplicate incoming notifications so updates are only dispatched
-            // when direction, distance, ETA, or target street/location changes.
+            val turnCmd = parsed.turnCommand
             val newKey = DeduplicationKey(
                 direction = parsed.direction,
                 distanceMeters = parsed.distanceMeters,
                 etaHours = parsed.etaHours,
                 etaMinutes = parsed.etaMinutes,
                 isDestinationArrived = parsed.isDestinationArrived,
-                streetOrLocationName = parsed.streetOrLocationName
+                streetOrLocationName = parsed.streetOrLocationName,
+                action = turnCmd?.action ?: ManeuverAction.UNKNOWN,
+                modifier = turnCmd?.modifier ?: TurnModifier.NONE,
+                roundaboutExit = turnCmd?.roundaboutExit,
+                exitNumber = turnCmd?.exitNumber
             )
 
+            // Exact duplicate check
             if (previousKey == newKey) {
                 _listenerState.update {
                     it.copy(
                         ignoredDuplicateCount = it.ignoredDuplicateCount + 1,
-                        lastUpdatedAtMs = System.currentTimeMillis()
+                        lastUpdatedAtMs = nowMs
                     )
                 }
                 return
             }
+
+            // High-priority immediate check vs routine distance countdown tick throttling (3 seconds):
+            // Fire immediately if action, direction, modifier, roundaboutExit, exitNumber, arrival state, or street name changed.
+            val isHighPriorityChange = previousKey == null ||
+                previousKey.direction != newKey.direction ||
+                previousKey.action != newKey.action ||
+                previousKey.modifier != newKey.modifier ||
+                previousKey.roundaboutExit != newKey.roundaboutExit ||
+                previousKey.exitNumber != newKey.exitNumber ||
+                previousKey.isDestinationArrived != newKey.isDestinationArrived ||
+                previousKey.streetOrLocationName != newKey.streetOrLocationName
+
+            val elapsedSinceLastDispatchMs = nowMs - lastDispatchedAtMs.get()
+            if (!isHighPriorityChange && elapsedSinceLastDispatchMs in 0 until countdownThrottleMs) {
+                _listenerState.update {
+                    it.copy(
+                        throttledCountdownCount = it.throttledCountdownCount + 1,
+                        lastUpdatedAtMs = nowMs
+                    )
+                }
+                return
+            }
+
             lastDispatchedKey.set(newKey)
+            lastDispatchedAtMs.set(nowMs)
 
             _listenerState.update {
                 it.copy(
                     isActiveNavigationOngoing = !parsed.isDestinationArrived,
                     lastParsedNavigation = parsed,
+                    lastTurnCommand = parsed.turnCommand,
                     dispatchedUpdateCount = it.dispatchedUpdateCount + 1,
                     lastStatusMessage = if (parsed.isDestinationArrived) {
                         "Destination Reached (0x08) • Arrived"
@@ -1092,7 +1135,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                         "Dispatched ${parsed.direction.title} (${parsed.direction.hexLabel}) • ${parsed.distanceMeters}m • ETA ${parsed.etaHours}h ${parsed.etaMinutes}m" +
                             if (parsed.streetOrLocationName.isNotBlank()) " • Street: ${parsed.streetOrLocationName}" else ""
                     },
-                    lastUpdatedAtMs = System.currentTimeMillis()
+                    lastUpdatedAtMs = nowMs
                 )
             }
 
@@ -1115,10 +1158,12 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
 
         internal fun handleNavigationStopped(reason: String = "Navigation stopped — active route cleared") {
             lastDispatchedKey.set(null)
+            lastDispatchedAtMs.set(0L)
             _listenerState.update {
                 it.copy(
                     isActiveNavigationOngoing = false,
                     lastParsedNavigation = null,
+                    lastTurnCommand = null,
                     lastStatusMessage = reason,
                     lastUpdatedAtMs = System.currentTimeMillis()
                 )
@@ -1130,7 +1175,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
 
         /**
          * Pure, unit-testable parser that extracts:
-         * 1. Direction ([TurnTypeConstant])
+         * 1. Direction ([TurnTypeConstant]) and unified [TurnCommand] (via [ManeuverExtractor])
          * 2. Distance Remaining to next turn (normalized integer meters)
          * 3. ETA Duration (integer hours and minutes, ignoring arrival clock times)
          *
@@ -1145,6 +1190,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             extraStrings: List<String> = emptyList(),
             iconResourceName: String? = null,
             iconShapeDirection: TurnTypeConstant? = null,
+            largeIconBitmap: Bitmap? = null,
             fallbackPreviousDirection: TurnTypeConstant? = null
         ): ParsedGoogleMapsNavigation? {
             val cleanTitle = title.replace('\u00A0', ' ').trim()
@@ -1152,7 +1198,7 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val cleanSubText = subText.replace('\u00A0', ' ').trim()
             val cleanTicker = tickerText.replace('\u00A0', ' ').trim()
 
-            if (cleanTitle.isEmpty() && cleanText.isEmpty() && cleanSubText.isEmpty() && cleanTicker.isEmpty() && iconResourceName.isNullOrEmpty()) {
+            if (cleanTitle.isEmpty() && cleanText.isEmpty() && cleanSubText.isEmpty() && cleanTicker.isEmpty() && iconResourceName.isNullOrEmpty() && largeIconBitmap == null) {
                 return null
             }
 
@@ -1165,7 +1211,21 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             val isArrival = isDestinationArrivalText(cleanTitle, cleanText, cleanSubText, extractedDistance) ||
                 (iconResourceName != null && parseDirectionFromIconResourceName(iconResourceName) == TurnTypeConstant.DESTINATION_REACHED)
 
+            val candidateExtraStrings = buildList {
+                if (cleanTicker.isNotBlank()) add(cleanTicker)
+                addAll(extraStrings)
+            }
+
             if (isArrival) {
+                val arrivalCommand = ManeuverExtractor.extract(
+                    title = cleanTitle,
+                    text = if (cleanText.contains("arrived", ignoreCase = true) || cleanText.contains("destination", ignoreCase = true)) cleanText else "You have arrived",
+                    subText = cleanSubText,
+                    largeIconBitmap = largeIconBitmap,
+                    extraStrings = candidateExtraStrings,
+                    iconResourceName = iconResourceName,
+                    fallbackTurnType = TurnTypeConstant.DESTINATION_REACHED
+                )
                 return ParsedGoogleMapsNavigation(
                     direction = TurnTypeConstant.DESTINATION_REACHED,
                     distanceMeters = 0,
@@ -1174,7 +1234,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                     isDestinationArrived = true,
                     rawTitle = cleanTitle,
                     rawText = cleanText,
-                    rawSubText = cleanSubText
+                    rawSubText = cleanSubText,
+                    turnCommand = arrivalCommand
                 )
             }
 
@@ -1192,8 +1253,15 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             }
             val textDirection = parseTurnDirectionFromCandidates(allCandidates)
 
-            // 3. Fallback to icon shape analysis (pixel distribution)
-            val shapeDirection = iconShapeDirection
+            // 3. Fallback to icon shape analysis (24x24 pixel-density + normalized topology)
+            val stage2BitmapCommand = largeIconBitmap?.let {
+                ManeuverExtractor.evaluate24x24IconFallback(
+                    bitmap = it,
+                    distanceRemaining = cleanTitle,
+                    rawInstruction = cleanText
+                )
+            }
+            val shapeDirection = iconShapeDirection ?: stage2BitmapCommand?.toTurnTypeConstant()
 
             val etaPair = parseEtaDurationHoursAndMinutes(cleanSubText, cleanText, cleanTitle)
 
@@ -1228,6 +1296,16 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 extraStrings = extraStrings
             )
 
+            val turnCommand = ManeuverExtractor.extract(
+                title = cleanTitle,
+                text = cleanText,
+                subText = cleanSubText,
+                largeIconBitmap = largeIconBitmap,
+                extraStrings = candidateExtraStrings,
+                iconResourceName = iconResourceName,
+                fallbackTurnType = resolvedDirection
+            )
+
             return ParsedGoogleMapsNavigation(
                 direction = resolvedDirection,
                 distanceMeters = resolvedDistanceMeters,
@@ -1237,7 +1315,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
                 rawTitle = cleanTitle,
                 rawText = cleanText,
                 rawSubText = cleanSubText,
-                streetOrLocationName = extractedStreet
+                streetOrLocationName = extractedStreet,
+                turnCommand = turnCommand
             )
         }
 

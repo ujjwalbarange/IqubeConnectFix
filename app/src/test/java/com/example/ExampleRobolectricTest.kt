@@ -148,5 +148,188 @@ class ExampleRobolectricTest {
         assertTrue("Top half must contain rendered '98%' text pixels", topPixels > 50)
         assertTrue("Bottom half must contain rendered '103km' text pixels", bottomPixels > 50)
     }
+
+    @Test
+    fun `verify ManeuverExtractor two-stage pipeline, 27-command catalog, TripSummary, and 3s throttling`() {
+        assertEquals(27, com.example.ble.ManeuverExtractor.COMMAND_CATALOG.size)
+
+        // Stage 1 Regex Tests across the core actions & TripSummary middle-dot parsing
+        val cmd1 = com.example.ble.ManeuverExtractor.extract(
+            title = "250 m",
+            text = "Turn left onto MG Road",
+            subText = "12 min · 4.2 km · 10:45 PM"
+        )
+        assertEquals(com.example.ble.ManeuverAction.TURN, cmd1.action)
+        assertEquals(com.example.ble.Direction.LEFT, cmd1.direction)
+        assertEquals(com.example.ble.TurnModifier.NORMAL, cmd1.modifier)
+        assertEquals("250 m", cmd1.distanceRemaining)
+        assertEquals("12 min", cmd1.tripSummary?.duration)
+        assertEquals("4.2 km", cmd1.tripSummary?.remainingDistance)
+        assertEquals("10:45 PM", cmd1.tripSummary?.eta)
+
+        // Highway exit with alphanumeric exitNumber ("14B")
+        val exitCmd = com.example.ble.ManeuverExtractor.extract(
+            title = "800 m",
+            text = "Take exit 14B toward Airport Rd",
+            subText = "8 min · 6.0 km · 11:00 AM"
+        )
+        assertEquals(com.example.ble.ManeuverAction.HIGHWAY_EXIT, exitCmd.action)
+        assertEquals(com.example.ble.Direction.RIGHT, exitCmd.direction)
+        assertEquals("14B", exitCmd.exitNumber)
+        assertEquals(15, exitCmd.commandId)
+
+        // Roundabout with numeric exit index (2nd exit)
+        val roundaboutCmd = com.example.ble.ManeuverExtractor.extract(
+            title = "150 m",
+            text = "At the roundabout, take the 2nd exit onto Broadway",
+            subText = "5 min · 1.8 km · 10:15 AM"
+        )
+        assertEquals(com.example.ble.ManeuverAction.ROUNDABOUT, roundaboutCmd.action)
+        assertEquals(2, roundaboutCmd.roundaboutExit)
+        assertEquals(19, roundaboutCmd.commandId)
+
+        // Sharp & Slight turns
+        val sharpRight = com.example.ble.ManeuverExtractor.extract("90 m", "Sharp right onto Service Rd")
+        assertEquals(com.example.ble.ManeuverAction.TURN, sharpRight.action)
+        assertEquals(com.example.ble.Direction.RIGHT, sharpRight.direction)
+        assertEquals(com.example.ble.TurnModifier.SHARP, sharpRight.modifier)
+
+        val slightLeft = com.example.ble.ManeuverExtractor.extract("110 m", "Bear left onto Flyover")
+        assertEquals(com.example.ble.ManeuverAction.TURN, slightLeft.action)
+        assertEquals(com.example.ble.Direction.LEFT, slightLeft.direction)
+        assertEquals(com.example.ble.TurnModifier.SLIGHT, slightLeft.modifier)
+
+        // Keep & Fork
+        val forkLeft = com.example.ble.ManeuverExtractor.extract("300 m", "At the fork, stay left toward Airport")
+        assertEquals(com.example.ble.ManeuverAction.FORK, forkLeft.action)
+        assertEquals(com.example.ble.Direction.LEFT, forkLeft.direction)
+
+        val keepRight = com.example.ble.ManeuverExtractor.extract("400 m", "Keep right toward City Center")
+        assertEquals(com.example.ble.ManeuverAction.KEEP, keepRight.action)
+        assertEquals(com.example.ble.Direction.RIGHT, keepRight.direction)
+
+        // U-Turn & Arrival & Reroute
+        val uTurn = com.example.ble.ManeuverExtractor.extract("60 m", "Make a U-turn onto NH-44")
+        assertEquals(com.example.ble.ManeuverAction.U_TURN, uTurn.action)
+        assertEquals(com.example.ble.TurnModifier.U_TURN, uTurn.modifier)
+
+        val arriveLeft = com.example.ble.ManeuverExtractor.extract("10 m", "Your destination is on the left")
+        assertEquals(com.example.ble.ManeuverAction.ARRIVE, arriveLeft.action)
+        assertEquals(com.example.ble.Direction.LEFT, arriveLeft.direction)
+
+        val reroute = com.example.ble.ManeuverExtractor.extract("", "Rerouting...")
+        assertEquals(com.example.ble.ManeuverAction.REROUTE, reroute.action)
+
+        // Stage 2 (24x24 Visual Icon Fallback when EXTRA_TEXT has only a street name "MG Road"):
+        val fillPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
+
+        // Left-heavy (>62% pixels on left side) -> Direction.LEFT
+        val left24 = Bitmap.createBitmap(24, 24, Bitmap.Config.ARGB_8888)
+        Canvas(left24).drawRect(2f, 4f, 11f, 20f, fillPaint)
+        val stage2Left = com.example.ble.ManeuverExtractor.extract(
+            title = "200 m",
+            text = "MG Road",
+            largeIconBitmap = left24
+        )
+        assertEquals(com.example.ble.ManeuverAction.TURN, stage2Left.action)
+        assertEquals(com.example.ble.Direction.LEFT, stage2Left.direction)
+
+        // Right-heavy (>62% pixels on right side) -> Direction.RIGHT
+        val right24 = Bitmap.createBitmap(24, 24, Bitmap.Config.ARGB_8888)
+        Canvas(right24).drawRect(13f, 4f, 22f, 20f, fillPaint)
+        val stage2Right = com.example.ble.ManeuverExtractor.extract(
+            title = "200 m",
+            text = "MG Road",
+            largeIconBitmap = right24
+        )
+        assertEquals(com.example.ble.ManeuverAction.TURN, stage2Right.action)
+        assertEquals(com.example.ble.Direction.RIGHT, stage2Right.direction)
+
+        // Bottom-heavy density -> ManeuverAction.U_TURN
+        val bottom24 = Bitmap.createBitmap(24, 24, Bitmap.Config.ARGB_8888)
+        Canvas(bottom24).drawRect(4f, 13f, 20f, 22f, fillPaint)
+        val stage2UTurn = com.example.ble.ManeuverExtractor.extract(
+            title = "120 m",
+            text = "MG Road",
+            largeIconBitmap = bottom24
+        )
+        assertEquals(com.example.ble.ManeuverAction.U_TURN, stage2UTurn.action)
+
+        // Balanced top-heavy density -> Direction.STRAIGHT
+        val topBalanced24 = Bitmap.createBitmap(24, 24, Bitmap.Config.ARGB_8888)
+        Canvas(topBalanced24).drawRect(6f, 2f, 18f, 11f, fillPaint)
+        val stage2Straight = com.example.ble.ManeuverExtractor.extract(
+            title = "500 m",
+            text = "MG Road",
+            largeIconBitmap = topBalanced24
+        )
+        assertEquals(com.example.ble.ManeuverAction.CONTINUE_STRAIGHT, stage2Straight.action)
+        assertEquals(com.example.ble.Direction.STRAIGHT, stage2Straight.direction)
+
+        // Requirement 3: Verify 3-second countdown throttling vs immediate high-priority maneuver change
+        GoogleMapsNotificationListenerService.handleNavigationStopped("Reset for test")
+        val beforeCount = GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount
+
+        // T=1000ms: Initial Turn Left at 300m -> Immediate dispatch (#1)
+        GoogleMapsNotificationListenerService.processExtractedNotificationSnapshot(
+            isOngoing = true,
+            category = android.app.Notification.CATEGORY_NAVIGATION,
+            snapshot = GoogleMapsNotificationListenerService.NotificationExtrasSnapshot(
+                title = "300 m",
+                text = "Turn left onto MG Road",
+                subText = "5 min · 1.2 km · 10:15 AM",
+                bigText = ""
+            ),
+            nowMs = 1_000L,
+            countdownThrottleMs = 3_000L
+        )
+        assertEquals(beforeCount + 1, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
+
+        // T=2000ms (+1.0s < 3.0s): Same maneuver & street, distance ticks to 280m -> Throttled!
+        GoogleMapsNotificationListenerService.processExtractedNotificationSnapshot(
+            isOngoing = true,
+            category = android.app.Notification.CATEGORY_NAVIGATION,
+            snapshot = GoogleMapsNotificationListenerService.NotificationExtrasSnapshot(
+                title = "280 m",
+                text = "Turn left onto MG Road",
+                subText = "5 min · 1.2 km · 10:15 AM",
+                bigText = ""
+            ),
+            nowMs = 2_000L,
+            countdownThrottleMs = 3_000L
+        )
+        assertEquals(beforeCount + 1, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
+
+        // T=4500ms (+3.5s >= 3.0s): Routine countdown tick to 220m after 3s window -> Dispatched (#2)
+        GoogleMapsNotificationListenerService.processExtractedNotificationSnapshot(
+            isOngoing = true,
+            category = android.app.Notification.CATEGORY_NAVIGATION,
+            snapshot = GoogleMapsNotificationListenerService.NotificationExtrasSnapshot(
+                title = "220 m",
+                text = "Turn left onto MG Road",
+                subText = "5 min · 1.1 km · 10:15 AM",
+                bigText = ""
+            ),
+            nowMs = 4_500L,
+            countdownThrottleMs = 3_000L
+        )
+        assertEquals(beforeCount + 2, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
+
+        // T=5000ms (+0.5s < 3.0s): High-priority direction change to Turn Right -> Immediate dispatch (#3)!
+        GoogleMapsNotificationListenerService.processExtractedNotificationSnapshot(
+            isOngoing = true,
+            category = android.app.Notification.CATEGORY_NAVIGATION,
+            snapshot = GoogleMapsNotificationListenerService.NotificationExtrasSnapshot(
+                title = "150 m",
+                text = "Turn right onto 100 Feet Rd",
+                subText = "4 min · 0.9 km · 10:14 AM",
+                bigText = ""
+            ),
+            nowMs = 5_000L,
+            countdownThrottleMs = 3_000L
+        )
+        assertEquals(beforeCount + 3, GoogleMapsNotificationListenerService.listenerState.value.dispatchedUpdateCount)
+    }
 }
+
 
