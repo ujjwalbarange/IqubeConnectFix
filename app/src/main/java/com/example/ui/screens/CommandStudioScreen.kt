@@ -130,9 +130,9 @@ fun CommandStudioScreen(
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "Auto 10s",
+                            text = "Steady 0.45s",
                             style = MaterialTheme.typography.labelSmall,
-                            color = TextSecondary
+                            color = NeonMint
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Switch(

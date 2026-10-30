@@ -294,6 +294,9 @@ class IqubeBleManager(
     private val _autoLocationSyncEnabled = MutableStateFlow(true)
     val autoLocationSyncEnabled: StateFlow<Boolean> = _autoLocationSyncEnabled.asStateFlow()
 
+    private val _locationRefreshIntervalMs = MutableStateFlow(IqubeBleSpec.LOCATION_STEADY_REPEAT_MS)
+    val locationRefreshIntervalMs: StateFlow<Long> = _locationRefreshIntervalMs.asStateFlow()
+
     private val _fragmentedSliceTestEnabled = MutableStateFlow(false)
     val fragmentedSliceTestEnabled: StateFlow<Boolean> = _fragmentedSliceTestEnabled.asStateFlow()
 
@@ -775,6 +778,19 @@ class IqubeBleManager(
 
     fun setAutoLocationSyncEnabled(enabled: Boolean) {
         _autoLocationSyncEnabled.value = enabled
+        if (enabled) {
+            dumpLocationToClusterNow()
+        } else {
+            locationSyncJob?.cancel()
+        }
+    }
+
+    fun setLocationRefreshIntervalMs(intervalMs: Long) {
+        val clamped = intervalMs.coerceIn(250L, 30_000L)
+        _locationRefreshIntervalMs.value = clamped
+        if (_autoLocationSyncEnabled.value) {
+            startLocationSteadyKeepAliveLoop()
+        }
     }
 
     fun setCustomLocationOverride(customText: String) {
@@ -1081,13 +1097,20 @@ class IqubeBleManager(
             )
         }
 
+        val pktLocation0x5C = commandDispatcher.buildClusterLocationPacket(effectiveStreet)
+        _lastSyncedClusterLocation.value = effectiveStreet
+
         navSequenceJob?.cancel()
         navSequenceJob = scope.launch {
             commandDispatcher.enqueueCommand(
                 label = String.format("Nav Pkt1 [O %s (5B 4F … FF)", effectiveStreet),
                 rawPayload = pktInstruction0x4F
             )
-            delay(IqubeBleSpec.NAVIGATION_INTER_PACKET_DELAY_MS) // 400 ms (0x190 ms)
+            commandDispatcher.enqueueCommand(
+                label = String.format("Cluster Location [\\ %s (5B 5C … FF)", effectiveStreet),
+                rawPayload = pktLocation0x5C
+            )
+            delay(IqubeBleSpec.NAVIGATION_INTER_PACKET_DELAY_MS) // 120 ms fast inter-packet transition
             commandDispatcher.enqueueCommand(
                 label = String.format("Nav Pkt2 ZN %s (%dm, ETA %dm, Picto 0x%02X)", turn.title, clampedDist, safeEta, turn.code),
                 rawPayload = pktControl0x5A4E
@@ -1098,17 +1121,22 @@ class IqubeBleManager(
             )
         }
 
-        // Keep-Alive Loop: Continuously refresh the TVS cluster's 3-second display inactivity timer every 2.5s
-        // so turn maneuver, distance, and ETA remain continuously visible until navigation is turned off on the phone
+        // Steady Keep-Alive Loop: Continuously refresh the TVS cluster's ~1-second display hold timer every 450ms
+        // so street location (`0x5B 0x5C` / `0x5B 0x4F`), turn maneuver, distance, and ETA remain 100% steady without blinking
         navKeepAliveJob?.cancel()
         if (turn != TurnTypeConstant.DESTINATION_REACHED && clampedDist > 0) {
             navKeepAliveJob = scope.launch {
                 while (isActive && _navigationState.value.distanceMeters > 0 &&
                     _navigationState.value.selectedTurn != TurnTypeConstant.DESTINATION_REACHED
                 ) {
-                    delay(2500L)
-                    if (commandDispatcher.queueDepth.value <= 2 && !_incomingCallState.value.isRinging) {
+                    val intervalMs = _locationRefreshIntervalMs.value.coerceIn(300L, 2_000L)
+                    delay(intervalMs)
+                    if (commandDispatcher.queueDepth.value <= 1 && !_incomingCallState.value.isRinging) {
                         val currentNav = _navigationState.value
+                        val currentStreet = currentNav.streetName.ifBlank { currentNav.selectedTurn.title }
+                            .take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
+                        val refresh5B5C = commandDispatcher.buildClusterLocationPacket(currentStreet)
+                        val refresh5B4F = commandDispatcher.buildNavigationInstructionPacket0x4F(currentStreet)
                         val refresh5B4E = commandDispatcher.buildNavigationControlPacket0x4E(
                             turnCode = currentNav.selectedTurn.code,
                             distanceMeters = currentNav.distanceMeters,
@@ -1116,6 +1144,14 @@ class IqubeBleManager(
                             totalRemainingDistanceMeters = max(currentNav.distanceMeters, currentNav.distanceMeters + 200),
                             navActive = true,
                             headerByte = IqubeBleSpec.HEADER_ASCII_CMD
+                        )
+                        commandDispatcher.enqueueCommand(
+                            label = String.format("Steady Location KeepAlive [\\ %s (5B 5C)", currentStreet),
+                            rawPayload = refresh5B5C
+                        )
+                        commandDispatcher.enqueueCommand(
+                            label = String.format("Steady Street KeepAlive [O %s (5B 4F)", currentStreet),
+                            rawPayload = refresh5B4F
                         )
                         commandDispatcher.enqueueCommand(
                             label = String.format("Nav KeepAlive [N %s (%dm, ETA %dm)", currentNav.selectedTurn.title, currentNav.distanceMeters, currentNav.etaMinutes),
@@ -1213,6 +1249,10 @@ class IqubeBleManager(
             stopNavigationRouteSimulation()
             val totalEtaMinutes = ((etaHours.coerceIn(0, 23) * 60) + etaMinutes.coerceIn(0, 59)).coerceIn(0, 1439)
             val cleanStreet = streetOrLocationName.trim().take(IqubeBleSpec.MAX_LOCATION_ASCII_BYTES)
+            if (cleanStreet.isNotBlank()) {
+                _detectedLocalityName.value = cleanStreet
+                _lastSyncedClusterLocation.value = cleanStreet
+            }
             sendNavigationData(
                 turn = direction,
                 distanceMeters = distanceMeters.coerceIn(0, 65535),
@@ -1220,10 +1260,6 @@ class IqubeBleManager(
                 streetName = cleanStreet.ifBlank { direction.title },
                 etaMinutes = totalEtaMinutes
             )
-            if (cleanStreet.isNotBlank()) {
-                _detectedLocalityName.value = cleanStreet
-                dumpLocationToClusterNow(cleanStreet)
-            }
         }
     }
 
@@ -1930,20 +1966,7 @@ class IqubeBleManager(
             }
         }
 
-        locationSyncJob?.cancel()
-        locationSyncJob = scope.launch {
-            while (isActive) {
-                delay(IqubeBleSpec.LOCATION_SYNC_INTERVAL_MS)
-                val nowMs = System.currentTimeMillis()
-                // Pause automatic GPS location dumps while an incoming call, navigation, or song banner hold is active
-                if (isActivelyConnectedOrReplaying() && _autoLocationSyncEnabled.value &&
-                    !_incomingCallState.value.isRinging && !_navigationState.value.isRouteSimulationRunning &&
-                    nowMs >= lastBannerHoldUntilMs && !_isLinkDegraded.value
-                ) {
-                    dumpLocationToClusterNow()
-                }
-            }
-        }
+        startLocationSteadyKeepAliveLoop()
 
         phoneStatusKeepaliveJob?.cancel()
         phoneStatusKeepaliveJob = scope.launch {
@@ -2078,11 +2101,34 @@ class IqubeBleManager(
         )
     }
 
+    private fun startLocationSteadyKeepAliveLoop() {
+        locationSyncJob?.cancel()
+        locationSyncJob = scope.launch {
+            while (isActive) {
+                val intervalMs = _locationRefreshIntervalMs.value.coerceIn(250L, 30_000L)
+                delay(intervalMs)
+                val nowMs = System.currentTimeMillis()
+                val isNavKeepAliveActive = navKeepAliveJob?.isActive == true
+                // Continuously refresh 0x5B 0x5C Location before the cluster's 1-second hardware timer expires
+                if (isActivelyConnectedOrReplaying() && _autoLocationSyncEnabled.value &&
+                    !_incomingCallState.value.isRinging && !isNavKeepAliveActive &&
+                    nowMs >= lastBannerHoldUntilMs && !_isLinkDegraded.value &&
+                    commandDispatcher.queueDepth.value <= 1
+                ) {
+                    dumpLocationToClusterNow(ensureKeepAlive = false)
+                }
+            }
+        }
+    }
+
     /**
      * Builds and enqueues the 20-byte Location Display Packet (`[0x5B, 0x5C, ...17B ASCII, 0xFF]`)
-     * to Handle 0x0022 (`0x5352`).
+     * to Handle 0x0022 (`0x5352`) and keeps it steady on the cluster.
      */
-    fun dumpLocationToClusterNow(explicitLocationText: String? = null) {
+    fun dumpLocationToClusterNow(
+        explicitLocationText: String? = null,
+        ensureKeepAlive: Boolean = true
+    ) {
         val maxLen = IqubeBleSpec.MAX_LOCATION_ASCII_BYTES
         val effectiveLocation = when {
             !explicitLocationText.isNullOrBlank() -> explicitLocationText.trim().take(maxLen)
@@ -2095,6 +2141,9 @@ class IqubeBleManager(
             label = "Cluster Location [\\$effectiveLocation (0xFF)",
             rawPayload = payload
         )
+        if (ensureKeepAlive && _autoLocationSyncEnabled.value && locationSyncJob?.isActive != true) {
+            startLocationSteadyKeepAliveLoop()
+        }
     }
 
     private fun readHardwarePhoneBatteryPercent(): Int {
@@ -2190,6 +2239,9 @@ class IqubeBleManager(
                 label = "Vehicle Date Sync (0x5A 0xF1 DD/MM/YY)",
                 rawPayload = commandDispatcher.buildTripControlFrame(subCmd)
             )
+        } else if (_autoLocationSyncEnabled.value && !_incomingCallState.value.isRinging && System.currentTimeMillis() >= lastBannerHoldUntilMs) {
+            // Immediately restore the active 0x5B 0x5C Location after background 0x5B 0x4A clock sync so it never blanks out
+            dumpLocationToClusterNow(ensureKeepAlive = false)
         }
     }
 

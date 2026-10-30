@@ -89,14 +89,16 @@ object IqubeBleSpec {
     // Link, FIFO Spacing & Timing Constants
     const val REQUESTED_MTU = 517
     const val EXPECTED_NEGOTIATED_MTU = 247
-    const val INTER_COMMAND_SPACING_MS = 120L        // 120 ms minimum spacing between FIFO GATT writes
-    const val NAVIGATION_INTER_PACKET_DELAY_MS = 400L // 400 ms (0x190 ms) sleep between Nav Packet 1 (0x5B 0x49) and Packet 2 (0x5B 0x4E)
+    const val INTER_COMMAND_SPACING_MS = 50L         // 50 ms fast FIFO GATT write spacing to prevent queue lag
+    const val NAVIGATION_INTER_PACKET_DELAY_MS = 120L // 120 ms delay between Nav Packet 1 (0x5B 0x4F) and Packet 2 (0x5B 0x4E)
     const val CALLER_REPEAT_TIMER_MS = 500L          // 500 ms iQubeCallerDataSendTimer while ringing
+    const val LOCATION_STEADY_REPEAT_MS = 450L       // 450 ms continuous repeat so 0x5B 0x5C location never times out after 1s
+    const val NAV_KEEP_ALIVE_INTERVAL_MS = 450L      // 450 ms continuous keep-alive so navigation & street stay steady
     const val WRITE_ACK_TIMEOUT_MS = 500L
     const val LINK_WATCHDOG_DEGRADED_MS = 2500L
     const val SUPERVISION_TIMEOUT_MS = 6000L
-    const val HEARTBEAT_INTERVAL_MS = 1800L
-    const val LOCATION_SYNC_INTERVAL_MS = 10_000L
+    const val HEARTBEAT_INTERVAL_MS = 15_000L        // 15s clock sync so 0x5B 0x4A never interrupts 0x5B 0x5C every 1s
+    const val LOCATION_SYNC_INTERVAL_MS = 450L       // 450 ms steady location hold by default
     const val PHONE_STATUS_SYNC_INTERVAL_MS = 60_000L
 
     // True Range Baseline Constants

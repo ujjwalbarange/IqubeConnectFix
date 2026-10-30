@@ -496,7 +496,19 @@ class IqubeCommandDispatcher(
 
         scope.launch {
             queueMutex.withLock {
-                pendingQueue.addLast(command)
+                val existingIdx = pendingQueue.indexOfFirst { existing ->
+                    existing.payload.size >= 3 &&
+                        command.payload.size >= 3 &&
+                        existing.payload[0] == command.payload[0] &&
+                        existing.payload[1] == command.payload[1] &&
+                        (command.payload[1] != IqubeBleSpec.DATA_ID_HANDSHAKE_52 ||
+                            (existing.payload[2] == 0x55.toByte()) == (command.payload[2] == 0x55.toByte()))
+                }
+                if (existingIdx >= 0) {
+                    pendingQueue[existingIdx] = command
+                } else {
+                    pendingQueue.addLast(command)
+                }
                 _queueDepth.value = pendingQueue.size
                 recordCommandUpdate(command)
             }

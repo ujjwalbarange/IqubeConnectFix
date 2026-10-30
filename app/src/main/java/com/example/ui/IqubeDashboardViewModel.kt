@@ -85,6 +85,7 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
     val detectedLocalityName: StateFlow<String> = bleManager.detectedLocalityName
     val customLocationOverride: StateFlow<String> = bleManager.customLocationOverride
     val lastSyncedClusterLocation: StateFlow<String?> = bleManager.lastSyncedClusterLocation
+    val locationRefreshIntervalMs: StateFlow<Long> = bleManager.locationRefreshIntervalMs
 
     val commandHistory: StateFlow<List<QueuedWriteCommand>> = bleManager.commandDispatcher.commandHistory
     val queueDepth: StateFlow<Int> = bleManager.commandDispatcher.queueDepth
@@ -145,6 +146,10 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
 
     fun setAutoLocationSyncEnabled(enabled: Boolean) {
         bleManager.setAutoLocationSyncEnabled(enabled)
+    }
+
+    fun setLocationRefreshIntervalMs(intervalMs: Long) {
+        bleManager.setLocationRefreshIntervalMs(intervalMs)
     }
 
     // Dedicated Caller ID Banner (`0x5B 0x43` + 500ms repeat timer) & Outgoing/Missed Call Relays

@@ -56,6 +56,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -181,6 +182,8 @@ fun CockpitDashboardScreen(
     onSimulateDisconnectWhileChargingClick: () -> Unit = {},
     onCalibrateOfflineBatterySoc: (Int) -> Unit = {},
     onStopOfflinePredictedChargingClick: () -> Unit = {},
+    locationRefreshIntervalMs: Long = IqubeBleSpec.LOCATION_STEADY_REPEAT_MS,
+    onSetLocationRefreshIntervalMs: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -278,11 +281,13 @@ fun CockpitDashboardScreen(
                 customLocationOverride = customLocationOverride,
                 lastSyncedClusterLocation = lastSyncedClusterLocation,
                 autoLocationSyncEnabled = autoLocationSyncEnabled,
+                locationRefreshIntervalMs = locationRefreshIntervalMs,
                 isCallRinging = incomingCallState.isRinging,
                 activeCallerText = incomingCallState.clusterFormattedText,
                 mediaPlayerState = mediaPlayerState,
                 onCustomLocationOverrideChange = onCustomLocationOverrideChange,
                 onSetAutoLocationSync = onSetAutoLocationSync,
+                onSetLocationRefreshIntervalMs = onSetLocationRefreshIntervalMs,
                 onDumpLocationNowClick = onDumpLocationToClusterClick
             )
 
@@ -2155,17 +2160,20 @@ private fun VerifiedTripControlsCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ClusterLocationSyncCard(
     detectedLocalityName: String,
     customLocationOverride: String,
     lastSyncedClusterLocation: String?,
     autoLocationSyncEnabled: Boolean,
+    locationRefreshIntervalMs: Long = IqubeBleSpec.LOCATION_STEADY_REPEAT_MS,
     isCallRinging: Boolean,
     activeCallerText: String,
     mediaPlayerState: MediaPlayerState,
     onCustomLocationOverrideChange: (String) -> Unit,
     onSetAutoLocationSync: (Boolean) -> Unit,
+    onSetLocationRefreshIntervalMs: (Long) -> Unit = {},
     onDumpLocationNowClick: () -> Unit
 ) {
     val topLocationPinText = (lastSyncedClusterLocation ?: customLocationOverride.ifBlank { detectedLocalityName }).ifBlank { "Dhantoli" }
@@ -2173,6 +2181,13 @@ private fun ClusterLocationSyncCard(
         isCallRinging -> "📞 CALL: $activeCallerText (0x5B 0x43 @ 500ms)"
         mediaPlayerState.isPlaying -> "🎵 ${mediaPlayerState.trackTitle} (0x5B 0x62)"
         else -> "Standby (Caller 0x43 / Music 0x62)"
+    }
+    val formattedIntervalLabel = remember(locationRefreshIntervalMs) {
+        if (locationRefreshIntervalMs < 1000L) {
+            String.format(Locale.US, "Steady %.2fs", locationRefreshIntervalMs / 1000.0)
+        } else {
+            String.format(Locale.US, "Hold %.1fs", locationRefreshIntervalMs / 1000.0)
+        }
     }
 
     Column(
@@ -2204,7 +2219,7 @@ private fun ClusterLocationSyncCard(
                         color = ElectricCyan
                     )
                     Text(
-                        text = "Locality: \"$detectedLocalityName\"${if (isCallRinging) " • Auto-Sync Paused While Ringing" else ""}",
+                        text = "Locality: \"$detectedLocalityName\" • Steady Repeat ($formattedIntervalLabel)${if (isCallRinging) " • Paused While Ringing" else ""}",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextSecondary
                     )
@@ -2212,15 +2227,57 @@ private fun ClusterLocationSyncCard(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "Auto 10s",
+                    text = formattedIntervalLabel,
                     style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
+                    color = NeonMint
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Switch(
                     checked = autoLocationSyncEnabled,
                     onCheckedChange = onSetAutoLocationSync
                 )
+            }
+        }
+
+        // Steady Keep-Alive Interval Selector (prevents 1s ON / 1s OFF cluster timeout)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(SlateCardElevated)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "CLUSTER LOCATION HOLD / KEEP-ALIVE CADENCE (Prevents 1s hardware display timeout)",
+                style = MaterialTheme.typography.labelSmall,
+                color = NeonMint
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val presets = listOf(
+                    450L to "Steady 0.45s (No Flicker)",
+                    750L to "Fast 0.75s",
+                    1500L to "1.5s",
+                    3000L to "3.0s",
+                    5000L to "5.0s"
+                )
+                presets.forEach { (ms, label) ->
+                    val isSelected = locationRefreshIntervalMs == ms
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onSetLocationRefreshIntervalMs(ms) },
+                        label = {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        modifier = Modifier.testTag("location_hold_chip_$ms")
+                    )
+                }
             }
         }
 

@@ -117,6 +117,7 @@ fun IqubeCompanionApp(
     val detectedLocalityName by viewModel.detectedLocalityName.collectAsStateWithLifecycle()
     val customLocationOverride by viewModel.customLocationOverride.collectAsStateWithLifecycle()
     val lastSyncedClusterLocation by viewModel.lastSyncedClusterLocation.collectAsStateWithLifecycle()
+    val locationRefreshIntervalMs by viewModel.locationRefreshIntervalMs.collectAsStateWithLifecycle()
 
     val commandHistory by viewModel.commandHistory.collectAsStateWithLifecycle()
     val queueDepth by viewModel.queueDepth.collectAsStateWithLifecycle()
@@ -298,7 +299,9 @@ fun IqubeCompanionApp(
                                     onStopChargingAlarm = viewModel::stopChargingAlarm,
                                     onTestChargingAlert = {
                                         viewModel.bleManager.triggerChargingAlert(chargingAlertConfig.targetPct)
-                                    }
+                                    },
+                                    locationRefreshIntervalMs = locationRefreshIntervalMs,
+                                    onSetLocationRefreshIntervalMs = viewModel::setLocationRefreshIntervalMs
                                 )
                             }
                             DashboardDestination.SAVED_TRIPS -> {
