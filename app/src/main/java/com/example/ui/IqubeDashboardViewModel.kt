@@ -348,10 +348,17 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
         bleManager.startGpsTelemetryFusion()
     }
 
+    val savedTemplates: StateFlow<List<WidgetCustomTemplate>> = bleManager.savedTemplates
     val activeCustomTemplate: StateFlow<WidgetCustomTemplate> = bleManager.activeCustomTemplate
+    val activeNotificationTemplate: StateFlow<WidgetCustomTemplate> = bleManager.activeNotificationTemplate
+    val activeTileTemplate: StateFlow<WidgetCustomTemplate> = bleManager.activeTileTemplate
 
-    fun saveCustomTemplate(template: WidgetCustomTemplate) {
-        bleManager.updateActiveCustomTemplate(template)
+    fun saveCustomTemplate(template: WidgetCustomTemplate, pinToHome: Boolean = false) {
+        bleManager.updateActiveCustomTemplate(template, pinToHome = pinToHome)
+    }
+
+    fun deleteCustomTemplate(templateId: String) {
+        bleManager.deleteCustomTemplate(templateId)
     }
 
     fun importCanvaImage(uri: Uri): String? {

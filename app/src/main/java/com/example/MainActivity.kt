@@ -117,6 +117,9 @@ fun IqubeCompanionApp(
     val savedChargingSessions by viewModel.savedChargingSessions.collectAsStateWithLifecycle()
     val activeTripSession by viewModel.activeTripSession.collectAsStateWithLifecycle()
     val activeCustomTemplate by viewModel.activeCustomTemplate.collectAsStateWithLifecycle()
+    val activeNotificationTemplate by viewModel.activeNotificationTemplate.collectAsStateWithLifecycle()
+    val activeTileTemplate by viewModel.activeTileTemplate.collectAsStateWithLifecycle()
+    val savedTemplates by viewModel.savedTemplates.collectAsStateWithLifecycle()
 
     val detectedLocalityName by viewModel.detectedLocalityName.collectAsStateWithLifecycle()
     val customLocationOverride by viewModel.customLocationOverride.collectAsStateWithLifecycle()
@@ -335,16 +338,20 @@ fun IqubeCompanionApp(
                             DashboardDestination.STUDIO_SANDBOX -> {
                                 CustomizationStudioScreen(
                                     activeTemplate = activeCustomTemplate,
-                                    onSaveTemplate = viewModel::saveCustomTemplate,
+                                    activeNotificationTemplate = activeNotificationTemplate,
+                                    activeTileTemplate = activeTileTemplate,
+                                    savedTemplates = savedTemplates,
+                                    onSaveTemplate = { tpl, pin -> viewModel.saveCustomTemplate(tpl, pin) },
+                                    onDeleteTemplate = viewModel::deleteCustomTemplate,
                                     onImportCanvaImage = viewModel::importCanvaImage,
                                     onBackupAllData = viewModel::backupAllData,
                                     onRestoreAllData = viewModel::restoreAllData,
                                     backupFolderPath = viewModel.getSharedStorageBackupPath(),
-                                    currentBatteryPct = telemetry.batteryPercent ?: chargingMonitor.currentBatteryPct ?: lastSeenState?.batteryPct ?: 87,
-                                    currentRangeKm = telemetry.clusterRangeKm ?: chargingMonitor.clusterRangeKm ?: lastSeenState?.clusterRangeKm ?: 92.0,
-                                    trueEcoKm = trueRange.trueEcoRangeKm ?: 87.0,
-                                    truePowerKm = trueRange.truePowerRangeKm ?: 65.3,
-                                    localityName = detectedLocalityName.ifBlank { lastSeenState?.locationName ?: "Medical College Rd" },
+                                    currentBatteryPct = telemetry.batteryPercent ?: chargingMonitor.currentBatteryPct ?: lastSeenState?.batteryPct ?: 93,
+                                    currentRangeKm = telemetry.clusterRangeKm ?: chargingMonitor.clusterRangeKm ?: lastSeenState?.clusterRangeKm ?: 98.0,
+                                    trueEcoKm = trueRange.trueEcoRangeKm ?: 93.0,
+                                    truePowerKm = trueRange.truePowerRangeKm ?: 70.0,
+                                    localityName = detectedLocalityName.ifBlank { lastSeenState?.locationName ?: "Dhantoli" },
                                     isCharging = telemetry.isCharging || chargingMonitor.isCharging
                                 )
                             }

@@ -6,22 +6,27 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
+import android.os.Bundle
 import android.widget.RemoteViews
 import com.example.MainActivity
 import com.example.R
-import com.example.ble.IqubeBleManager
-import com.example.model.BleConnectionPhase
-import java.text.SimpleDateFormat
-import java.util.Date
+import com.example.ble.IqubeSharedStorageManager
+import com.example.model.ClickAction
+import com.example.model.WidgetCustomTemplate
+import com.example.model.WidgetGridSize
 import java.util.Locale
 
 /**
- * Android Home Screen App Widget for TVS iQube Cockpit.
- * Displays live or last-seen battery SoC, DTE cluster range, learned True Range (Eco & Power),
- * connection status, and locality with a single tap to open the app.
+ * Primary (4×2 Full Cockpit) App Widget Provider & Base Renderer for all TVS iQube Widget Slots.
+ * Supports live responsive resizing (1×1 up to 4×3), custom Studio canvas elements,
+ * custom border roundness, and Canva graphic backgrounds.
  */
-class IqubeAppWidgetProvider : AppWidgetProvider() {
+open class IqubeAppWidgetProvider : AppWidgetProvider() {
+
+    protected open val slotIndex: Int = 0
 
     override fun onUpdate(
         context: Context,
@@ -29,193 +34,190 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
         appWidgetIds: IntArray
     ) {
         for (appWidgetId in appWidgetIds) {
-            updateAppWidget(context, appWidgetManager, appWidgetId)
+            updateSingleWidget(context, appWidgetManager, appWidgetId, slotIndex)
         }
     }
 
+    override fun onAppWidgetOptionsChanged(
+        context: Context,
+        appWidgetManager: AppWidgetManager,
+        appWidgetId: Int,
+        newOptions: Bundle
+    ) {
+        super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
+        updateSingleWidget(context, appWidgetManager, appWidgetId, slotIndex, newOptions)
+    }
+
     companion object {
+        private fun getAllProviderClasses(): List<Pair<Int, Class<out IqubeAppWidgetProvider>>> {
+            return listOf(
+                0 to IqubeAppWidgetProvider::class.java,
+                1 to IqubeCompact2x1WidgetProvider::class.java,
+                2 to IqubeMini1x1WidgetProvider::class.java,
+                3 to IqubeCustomSlot3WidgetProvider::class.java,
+                4 to IqubeCustomSlot4WidgetProvider::class.java
+            )
+        }
+
         fun updateAllWidgets(context: Context) {
-            val appWidgetManager = AppWidgetManager.getInstance(context)
-            val thisWidget = ComponentName(context, IqubeAppWidgetProvider::class.java)
-            val allWidgetIds = appWidgetManager.getAppWidgetIds(thisWidget)
-            for (widgetId in allWidgetIds) {
-                updateAppWidget(context, appWidgetManager, widgetId)
+            runCatching {
+                val appWidgetManager = AppWidgetManager.getInstance(context)
+                for ((slotIdx, cls) in getAllProviderClasses()) {
+                    val component = ComponentName(context, cls)
+                    val ids = appWidgetManager.getAppWidgetIds(component)
+                    for (widgetId in ids) {
+                        updateSingleWidget(context, appWidgetManager, widgetId, slotIdx)
+                    }
+                }
             }
             com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
         }
 
-        private fun updateAppWidget(
+        /**
+         * Enables the corresponding Android AppWidget provider in the launcher's "Add Widgets" menu
+         * and requests pinning if supported by the launcher.
+         */
+        fun activateAndPinWidgetTemplate(
+            context: Context,
+            template: WidgetCustomTemplate,
+            requestSystemPinDialog: Boolean = false
+        ): Boolean {
+            val slot = when {
+                template.widgetSlotIndex in 1..4 -> template.widgetSlotIndex
+                template.gridSize == WidgetGridSize.SIZE_1X1 -> 2
+                template.gridSize == WidgetGridSize.SIZE_2X1 -> 1
+                else -> 0
+            }
+            val updatedTemplate = template.copy(widgetSlotIndex = slot)
+            val storage = IqubeSharedStorageManager.getInstance(context)
+            storage.upsertTemplate(updatedTemplate)
+
+            val targetClass = getAllProviderClasses().firstOrNull { it.first == slot }?.second
+                ?: IqubeAppWidgetProvider::class.java
+            val componentName = ComponentName(context, targetClass)
+
+            runCatching {
+                context.packageManager.setComponentEnabledSetting(
+                    componentName,
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                    PackageManager.DONT_KILL_APP
+                )
+            }
+
+            updateAllWidgets(context)
+
+            if (requestSystemPinDialog && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                return runCatching {
+                    val appWidgetManager = AppWidgetManager.getInstance(context)
+                    if (appWidgetManager.isRequestPinAppWidgetSupported) {
+                        appWidgetManager.requestPinAppWidget(componentName, null, null)
+                    } else false
+                }.getOrDefault(false)
+            }
+            return true
+        }
+
+        internal fun updateSingleWidget(
             context: Context,
             appWidgetManager: AppWidgetManager,
-            appWidgetId: Int
+            appWidgetId: Int,
+            slotIndex: Int,
+            optionsOverride: Bundle? = null
         ) {
             val views = RemoteViews(context.packageName, R.layout.widget_iqube_cockpit)
-            val bleManager = IqubeBleManager.getInstance(context)
+            val storage = IqubeSharedStorageManager.getInstance(context)
+            val template = storage.getTemplateForAppWidget(appWidgetId, slotIndex)
+            val snapshot = CustomSurfaceCanvasRenderer.captureLiveSnapshot(context)
 
-            val phase = bleManager.connectionPhase.value
-            val isConnected = phase == BleConnectionPhase.STREAMING_ACTIVE ||
-                phase == BleConnectionPhase.REPLAYING_RIDING_LOG ||
-                phase == BleConnectionPhase.REPLAYING_CHARGING_LOG
+            // Resolve live launcher dimensions when user resizes the widget
+            val options = optionsOverride ?: runCatching { appWidgetManager.getAppWidgetOptions(appWidgetId) }.getOrNull()
+            val minW = options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 0)?.takeIf { it > 40 }
+                ?: template.gridSize.minWidthDp
+            val minH = options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 0)?.takeIf { it > 40 }
+                ?: template.gridSize.minHeightDp
 
-            val isConnecting = phase == BleConnectionPhase.SCANNING ||
-                phase == BleConnectionPhase.CONNECTING_GATT ||
-                phase == BleConnectionPhase.DISCOVERING_SERVICES ||
-                phase == BleConnectionPhase.ENABLING_CCCD ||
-                phase == BleConnectionPhase.NEGOTIATING_MTU ||
-                phase == BleConnectionPhase.SENDING_HANDSHAKE
+            // Render custom Studio canvas into a high-DPI Bitmap
+            val renderedBitmap = CustomSurfaceCanvasRenderer.renderTemplateToBitmap(
+                context = context,
+                template = template,
+                targetWidthDp = minW,
+                targetHeightDp = minH,
+                snapshot = snapshot
+            )
+            views.setImageViewBitmap(R.id.widget_custom_canvas_img, renderedBitmap)
 
-            val tele = bleManager.packetParser.telemetryState.value
-            val lastSeen = bleManager.lastSeenState.value
-            val trueRange = bleManager.trueRangeState.value
-            val charging = bleManager.chargingMonitorState.value
-            val isCharging = tele.isCharging || charging.isCharging
-
-            val batteryPct = tele.batteryPercent
-                ?: charging.currentBatteryPct
-                ?: lastSeen?.batteryPct
-                ?: 93
-            val clusterRangeKm = tele.clusterRangeKm
-                ?: charging.clusterRangeKm
-                ?: lastSeen?.clusterRangeKm
-                ?: 98.0
-            val ecoTrue = trueRange.trueEcoRangeKm ?: (batteryPct * trueRange.ecoKmPerPct)
-            val pwrTrue = trueRange.truePowerRangeKm ?: (batteryPct * trueRange.powerKmPerPct)
-
-            val locality = bleManager.detectedLocalityName.value.ifBlank {
-                lastSeen?.locationName ?: "Dhantoli"
+            // Also populate fallback views for accessibility & unit tests
+            views.setTextViewText(R.id.widget_title, snapshot.vehicleName)
+            views.setTextViewText(R.id.widget_status_badge, snapshot.statusBadgeText)
+            runCatching {
+                views.setTextColor(R.id.widget_status_badge, Color.parseColor(snapshot.statusBadgeColorHex))
             }
-
-            // Connection Status Badge
-            when {
-                charging.isDisconnectedPredicted -> {
-                    views.setTextViewText(R.id.widget_status_badge, "⚡ Pred • Calibrate")
-                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#FFB300")) // Amber Warning
-                }
-                isCharging -> {
-                    views.setTextViewText(R.id.widget_status_badge, "⚡ Charging")
-                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#00E5FF")) // Electric Cyan
-                }
-                isConnected -> {
-                    views.setTextViewText(R.id.widget_status_badge, "● Connected")
-                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#00E676")) // Neon Mint
-                }
-                isConnecting -> {
-                    views.setTextViewText(R.id.widget_status_badge, "⟳ Connecting")
-                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#FFA000")) // Amber
-                }
-                charging.needsCalibration -> {
-                    views.setTextViewText(R.id.widget_status_badge, "⚠️ Needs Cal")
-                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#FFB300"))
-                }
-                else -> {
-                    views.setTextViewText(R.id.widget_status_badge, "○ Disconnected")
-                    views.setTextColor(R.id.widget_status_badge, Color.parseColor("#94A3B8")) // Slate
-                }
-            }
-
-            val devName = bleManager.connectedDeviceName.value.ifBlank { "TVSiQUBE" }
-            views.setTextViewText(R.id.widget_title, "$devName Cockpit")
             views.setTextViewText(
                 R.id.widget_battery_pct,
-                if (isCharging) "⚡ $batteryPct%" else "$batteryPct%"
+                if (snapshot.isCharging) "⚡ ${snapshot.batteryPct}%" else "${snapshot.batteryPct}%"
             )
-            views.setProgressBar(R.id.widget_battery_bar, 100, batteryPct, false)
+            views.setProgressBar(R.id.widget_battery_bar, 100, snapshot.batteryPct, false)
 
-            if (isCharging) {
-                val to80Sec = charging.remainingSecondsTo80
-                val timeTo80Str = when {
-                    batteryPct >= 80 -> "To 80%: Done (≥80%)"
-                    to80Sec != null && to80Sec > 0 -> {
-                        val mins = (to80Sec / 60).coerceAtLeast(1)
-                        if (mins >= 60) "To 80%: ${mins / 60}h ${mins % 60}m" else "To 80%: ${mins}m"
-                    }
-                    else -> "To 80%: Estimating..."
-                }
-
-                val toFullSec = charging.remainingSecondsTo100
-                val timeToFullStr = when {
-                    batteryPct >= 100 -> "Full: 100% Charged"
-                    toFullSec != null && toFullSec > 0 -> {
-                        val mins = (toFullSec / 60).coerceAtLeast(1)
-                        if (mins >= 60) "To Full: ${mins / 60}h ${mins % 60}m" else "To Full: ${mins}m"
-                    }
-                    else -> "To Full: Estimating..."
-                }
-
-                views.setTextViewText(R.id.widget_cluster_range, timeTo80Str)
-                views.setTextColor(R.id.widget_cluster_range, Color.parseColor("#00E676")) // Neon Mint
-                views.setTextViewText(R.id.widget_true_range, timeToFullStr)
-                views.setTextColor(R.id.widget_true_range, Color.parseColor("#00E5FF")) // Electric Cyan
+            if (snapshot.isCharging) {
+                views.setTextViewText(R.id.widget_cluster_range, "To 80%: ${snapshot.timeTo80Str}")
+                views.setTextViewText(R.id.widget_true_range, "To Full: ${snapshot.timeToFullStr}")
             } else {
                 views.setTextViewText(
                     R.id.widget_cluster_range,
-                    String.format(Locale.US, "DTE: %.0f km", clusterRangeKm)
+                    String.format(Locale.US, "DTE: %.0f km", snapshot.clusterRangeKm)
                 )
-                views.setTextColor(R.id.widget_cluster_range, Color.parseColor("#F1F5F9"))
                 views.setTextViewText(
                     R.id.widget_true_range,
-                    String.format(Locale.US, "True: %.0f km (Eco) • %.0f km (Pwr)", ecoTrue, pwrTrue)
+                    String.format(Locale.US, "True: %.0f km (Eco) • %.0f km (Pwr)", snapshot.trueEcoKm, snapshot.truePowerKm)
                 )
-                views.setTextColor(R.id.widget_true_range, Color.parseColor("#94A3B8"))
             }
+            views.setTextViewText(R.id.widget_location, "📍 ${snapshot.localityName}")
+            views.setTextViewText(R.id.widget_last_seen, snapshot.lastSeenFormatted)
 
-            views.setTextViewText(R.id.widget_location, "📍 $locality")
+            // Click Intent configured by template
+            val pendingIntent = buildClickPendingIntent(context, template.clickAction, appWidgetId)
+            views.setOnClickPendingIntent(R.id.widget_container, pendingIntent)
 
-            val timeStr = when {
-                charging.isDisconnectedPredicted -> "⚠️ Predicted • Needs Calibration"
-                isCharging -> "⚡ Charging Active"
-                isConnected -> "Live Telemetry"
-                charging.needsCalibration -> "⚠️ Needs Calibration"
-                else -> {
-                    val ts = lastSeen?.timestampMs ?: System.currentTimeMillis()
-                    "Last seen " + SimpleDateFormat("hh:mm a", Locale.US).format(Date(ts))
-                }
-            }
-            views.setTextViewText(R.id.widget_last_seen, timeStr)
+            appWidgetManager.updateAppWidget(appWidgetId, views)
+        }
 
-            // Read custom template from shared storage
-            val activeTemplate = com.example.ble.IqubeSharedStorageManager.getInstance(context).loadActiveTemplate()
-            runCatching {
-                val accentColor = Color.parseColor(activeTemplate.accentColorHex)
-                views.setTextColor(R.id.widget_title, accentColor)
-                if (!isCharging) {
-                    views.setTextColor(R.id.widget_battery_pct, Color.parseColor(activeTemplate.textColorHex))
-                }
-            }
-
-            // Click Intent configured by active template
-            val pendingIntent = when (activeTemplate.clickAction) {
-                com.example.model.ClickAction.TRIGGER_BLE_CONNECT -> {
+        fun buildClickPendingIntent(
+            context: Context,
+            clickAction: ClickAction,
+            requestCodeSeed: Int = 0
+        ): PendingIntent {
+            return when (clickAction) {
+                ClickAction.TRIGGER_BLE_CONNECT -> {
                     val connectIntent = Intent(context, com.example.ble.IqubeBleForegroundService::class.java).apply {
                         action = com.example.ble.IqubeBleForegroundService.ACTION_TRIGGER_CONNECT
                     }
                     PendingIntent.getService(
                         context,
-                        101,
+                        100 + requestCodeSeed,
                         connectIntent,
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                     )
                 }
-                com.example.model.ClickAction.OPEN_STUDIO_SANDBOX -> {
+                ClickAction.OPEN_STUDIO_SANDBOX -> {
                     val intent = Intent(context, MainActivity::class.java).apply {
                         flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                         putExtra("NAV_DESTINATION", "studio_sandbox")
                     }
                     PendingIntent.getActivity(
                         context,
-                        102,
+                        200 + requestCodeSeed,
                         intent,
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                     )
                 }
-                com.example.model.ClickAction.OPEN_SAVED_TRIPS -> {
+                ClickAction.OPEN_SAVED_TRIPS -> {
                     val intent = Intent(context, MainActivity::class.java).apply {
                         flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                         putExtra("NAV_DESTINATION", "saved_trips")
                     }
                     PendingIntent.getActivity(
                         context,
-                        103,
+                        300 + requestCodeSeed,
                         intent,
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                     )
@@ -226,15 +228,32 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
                     }
                     PendingIntent.getActivity(
                         context,
-                        0,
+                        requestCodeSeed,
                         intent,
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                     )
                 }
             }
-            views.setOnClickPendingIntent(R.id.widget_container, pendingIntent)
-
-            appWidgetManager.updateAppWidget(appWidgetId, views)
         }
     }
+}
+
+/** Slot 1: Compact 2×1 Pill Widget in Launcher "Add Widgets" */
+class IqubeCompact2x1WidgetProvider : IqubeAppWidgetProvider() {
+    override val slotIndex: Int = 1
+}
+
+/** Slot 2: Mini 1×1 Cube Widget in Launcher "Add Widgets" */
+class IqubeMini1x1WidgetProvider : IqubeAppWidgetProvider() {
+    override val slotIndex: Int = 2
+}
+
+/** Slot 3: Custom Created Studio Widget #1 in Launcher "Add Widgets" */
+class IqubeCustomSlot3WidgetProvider : IqubeAppWidgetProvider() {
+    override val slotIndex: Int = 3
+}
+
+/** Slot 4: Custom Created Studio Widget #2 in Launcher "Add Widgets" */
+class IqubeCustomSlot4WidgetProvider : IqubeAppWidgetProvider() {
+    override val slotIndex: Int = 4
 }

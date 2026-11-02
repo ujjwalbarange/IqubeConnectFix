@@ -15,7 +15,13 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.example.MainActivity
 import com.example.ble.IqubeBleManager
+import com.example.ble.IqubeSharedStorageManager
 import com.example.model.BleConnectionPhase
+import com.example.model.ClickAction
+import com.example.model.TargetSurface
+import com.example.model.TileMetricType
+import com.example.model.WidgetCustomTemplate
+import com.example.widget.CustomSurfaceCanvasRenderer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,14 +29,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
-import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
- * Android Quick Settings (Control Center) App Tile for glanceable TVS iQube battery SoC and range.
- * Dynamically renders a 2-line icon bitmap showing Battery % on top and Range (km) on bottom
- * (just like a live network speed tile), replacing the static Bluetooth symbol.
- * Tapping opens the app dashboard.
+ * Android Quick Settings (Control Center) App Tile for glanceable TVS iQube telemetry.
+ * Supports full Studio customization of Top Line Parameter, Bottom Line Parameter, Subtitle Parameter,
+ * Top Font Size, Bottom Font Size, Bold toggle, and optional Border Box.
  */
 class IqubeQuickSettingsTileService : TileService() {
 
@@ -48,9 +52,16 @@ class IqubeQuickSettingsTileService : TileService() {
                 bleManager.packetParser.telemetryState,
                 bleManager.lastSeenState,
                 bleManager.trueRangeState,
-                bleManager.chargingMonitorState
-            ) { phase, tele, lastSeen, trueRange, charging ->
-                TileSnapshot(phase, tele, lastSeen, trueRange, charging)
+                bleManager.chargingMonitorState,
+                bleManager.activeTileTemplate
+            ) { values ->
+                val phase = values[0] as BleConnectionPhase
+                val tele = values[1] as com.example.model.TelemetryState
+                val lastSeen = values[2] as? com.example.model.LastSeenScooterState
+                val trueRange = values[3] as com.example.model.TrueRangeCalculation
+                val charging = values[4] as com.example.model.ChargingMonitorState
+                val tileTemplate = values[5] as WidgetCustomTemplate
+                TileSnapshot(phase, tele, lastSeen, trueRange, charging, tileTemplate)
             }.collect { snapshot ->
                 renderTile(snapshot)
             }
@@ -64,95 +75,48 @@ class IqubeQuickSettingsTileService : TileService() {
 
     private fun renderTile(snapshot: TileSnapshot) {
         val tile = qsTile ?: return
+        val tileConfig = snapshot.tileTemplate.tileConfig
+        val liveSnapshot = CustomSurfaceCanvasRenderer.captureLiveSnapshot(applicationContext)
 
-        val isConnected = snapshot.phase in listOf(
-            BleConnectionPhase.STREAMING_ACTIVE,
-            BleConnectionPhase.REPLAYING_RIDING_LOG,
-            BleConnectionPhase.REPLAYING_CHARGING_LOG
-        )
-        val isConnecting = snapshot.phase in listOf(
-            BleConnectionPhase.SCANNING,
-            BleConnectionPhase.CONNECTING_GATT,
-            BleConnectionPhase.DISCOVERING_SERVICES,
-            BleConnectionPhase.ENABLING_CCCD,
-            BleConnectionPhase.NEGOTIATING_MTU,
-            BleConnectionPhase.SENDING_HANDSHAKE
-        )
-
-        val tele = snapshot.tele
-        val lastSeen = snapshot.lastSeen
-        val trueRange = snapshot.trueRange
-        val charging = snapshot.charging
-
-        val batteryPct = (
-            tele.batteryPercent
-                ?: charging.currentBatteryPct
-                ?: lastSeen?.batteryPct
-                ?: 93
-            ).coerceIn(0, 100)
-        val clusterRangeKm = (
-            tele.clusterRangeKm
-                ?: charging.clusterRangeKm
-                ?: lastSeen?.clusterRangeKm
-                ?: 98.0
-            ).coerceAtLeast(0.0)
-        val roundedRangeKm = clusterRangeKm.roundToInt()
-        val trueEcoKm = trueRange.trueEcoRangeKm ?: (batteryPct * trueRange.ecoKmPerPct)
-        val isCharging = (isConnected && tele.isCharging) || charging.isCharging
-
-        // Render 2-line dynamic bitmap icon ("98%" on top, "103km" on bottom) like the network speed tile
-        val bitmapIcon = createBatteryRangeTileBitmap(
-            batteryPct = batteryPct,
-            rangeKm = roundedRangeKm,
-            isCharging = isCharging
+        // Render customizable Control Center Tile bitmap (user-configured Top/Bottom parameters & font sizes)
+        val bitmapIcon = CustomSurfaceCanvasRenderer.renderControlCenterTileBitmap(
+            config = tileConfig,
+            snapshot = liveSnapshot
         )
         tile.icon = Icon.createWithBitmap(bitmapIcon)
+        tile.state = Tile.STATE_ACTIVE
 
-        when {
-            charging.isDisconnectedPredicted -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = "⚡ $batteryPct% • $roundedRangeKm km"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Needs Calibration"
+        // Tile Label (supports user's chosen topMetric + bottomMetric or custom text)
+        val topLabelStr = CustomSurfaceCanvasRenderer.resolveTileMetricText(
+            metric = tileConfig.topMetric,
+            snapshot = liveSnapshot,
+            customText = tileConfig.customTopText
+        )
+        val bottomLabelStr = if (tileConfig.bottomMetric != TileMetricType.NONE_SINGLE_LINE) {
+            CustomSurfaceCanvasRenderer.resolveTileMetricText(
+                metric = tileConfig.bottomMetric,
+                snapshot = liveSnapshot,
+                customText = tileConfig.customBottomText
+            )
+        } else ""
+        tile.label = if (bottomLabelStr.isNotBlank()) "$topLabelStr • $bottomLabelStr" else topLabelStr
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            tile.subtitle = when {
+                liveSnapshot.isDisconnectedPredicted -> "Needs Calibration"
+                liveSnapshot.isConnecting -> if (liveSnapshot.needsCalibration) "Needs Calibration" else "Connecting..."
+                tileConfig.subtitleMetric != TileMetricType.NONE_SINGLE_LINE -> {
+                    val subVal = CustomSurfaceCanvasRenderer.resolveTileMetricText(
+                        metric = tileConfig.subtitleMetric,
+                        snapshot = liveSnapshot,
+                        customText = tileConfig.customBottomText
+                    )
+                    if (liveSnapshot.isCharging) "Charging • $subVal" else subVal
                 }
-            }
-            isCharging -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = "⚡ $batteryPct% • $roundedRangeKm km"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = String.format(Locale.US, "Charging • %d km DTE", roundedRangeKm)
-                }
-            }
-            isConnected -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = "$batteryPct% • $roundedRangeKm km"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val spd = tele.speedKmh ?: 0
-                    tile.subtitle = if (spd > 0) {
-                        String.format(Locale.US, "%d km/h • %d km", spd, roundedRangeKm)
-                    } else {
-                        String.format(Locale.US, "True Eco: %.0f km", trueEcoKm)
-                    }
-                }
-            }
-            isConnecting -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = "$batteryPct% • $roundedRangeKm km"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = if (charging.needsCalibration) "Needs Calibration" else "Connecting..."
-                }
-            }
-            else -> {
-                // Keep STATE_ACTIVE so compact icon-only Control Center tiles highlight the % and km crisply
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = "$batteryPct% • $roundedRangeKm km"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val loc = lastSeen?.locationName?.takeIf { it.isNotBlank() } ?: "Parked"
-                    tile.subtitle = if (charging.needsCalibration) {
-                        "Needs Calibration"
-                    } else {
-                        String.format(Locale.US, "True: %.0f km • %s", trueEcoKm, loc)
-                    }
+                else -> if (liveSnapshot.isCharging) {
+                    "Charging • ${liveSnapshot.clusterRangeKm.roundToInt()} km"
+                } else {
+                    "True: ${liveSnapshot.trueEcoKm.roundToInt()} km"
                 }
             }
         }
@@ -162,16 +126,17 @@ class IqubeQuickSettingsTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val activeTemplate = com.example.ble.IqubeSharedStorageManager.getInstance(applicationContext).loadActiveTemplate()
-        if (activeTemplate.clickAction == com.example.model.ClickAction.TRIGGER_BLE_CONNECT) {
+        val activeTemplate = IqubeSharedStorageManager.getInstance(applicationContext)
+            .loadActiveTemplateForSurface(TargetSurface.CONTROL_CENTER_TILE)
+        if (activeTemplate.clickAction == ClickAction.TRIGGER_BLE_CONNECT) {
             val bleManager = IqubeBleManager.getInstance(applicationContext)
             bleManager.resetAutoReconnectWindowAndConnect()
         }
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            if (activeTemplate.clickAction == com.example.model.ClickAction.OPEN_STUDIO_SANDBOX) {
+            if (activeTemplate.clickAction == ClickAction.OPEN_STUDIO_SANDBOX) {
                 putExtra("NAV_DESTINATION", "studio_sandbox")
-            } else if (activeTemplate.clickAction == com.example.model.ClickAction.OPEN_SAVED_TRIPS) {
+            } else if (activeTemplate.clickAction == ClickAction.OPEN_SAVED_TRIPS) {
                 putExtra("NAV_DESTINATION", "saved_trips")
             }
         }
@@ -213,7 +178,7 @@ class IqubeQuickSettingsTileService : TileService() {
          * Generates a high-contrast 2-line transparent [Bitmap] icon showing:
          * - Line 1: Battery percentage (e.g., `"98%"` or `"⚡98%"`)
          * - Line 2: Range in km (e.g., `"103km"`)
-         * Designed to match compact Control Center / Quick Settings tiles (like Network Speed `3\nKB/s`).
+         * Used as the status-bar small icon and default fallback.
          */
         fun createBatteryRangeTileBitmap(
             batteryPct: Int,
@@ -233,7 +198,6 @@ class IqubeQuickSettingsTileService : TileService() {
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             }
 
-            // Fit top line (Battery %) cleanly into the upper half
             var topSize = 52f
             paint.textSize = topSize
             val maxAllowedWidth = size * 0.94f
@@ -246,7 +210,6 @@ class IqubeQuickSettingsTileService : TileService() {
             val topBaselineY = topCenterY - (topMetrics.ascent + topMetrics.descent) / 2f
             canvas.drawText(topText, size / 2f, topBaselineY, paint)
 
-            // Fit bottom line (Range km) cleanly into the lower half
             var bottomSize = 40f
             paint.textSize = bottomSize
             while (paint.measureText(bottomText) > maxAllowedWidth && bottomSize > 22f) {
@@ -268,5 +231,6 @@ private data class TileSnapshot(
     val tele: com.example.model.TelemetryState,
     val lastSeen: com.example.model.LastSeenScooterState?,
     val trueRange: com.example.model.TrueRangeCalculation,
-    val charging: com.example.model.ChargingMonitorState
+    val charging: com.example.model.ChargingMonitorState,
+    val tileTemplate: WidgetCustomTemplate
 )

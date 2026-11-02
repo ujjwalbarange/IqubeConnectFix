@@ -299,10 +299,27 @@ class IqubeBleManager(
     private val _autoReconnectWindowExpired = MutableStateFlow(false)
     val autoReconnectWindowExpired: StateFlow<Boolean> = _autoReconnectWindowExpired.asStateFlow()
 
+    private val sharedStorage = IqubeSharedStorageManager.getInstance(context)
+
+    private val _savedTemplates = MutableStateFlow<List<WidgetCustomTemplate>>(
+        sharedStorage.loadTemplates()
+    )
+    val savedTemplates: StateFlow<List<WidgetCustomTemplate>> = _savedTemplates.asStateFlow()
+
     private val _activeCustomTemplate = MutableStateFlow(
-        IqubeSharedStorageManager.getInstance(context).loadActiveTemplate()
+        sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.APP_WIDGET)
     )
     val activeCustomTemplate: StateFlow<WidgetCustomTemplate> = _activeCustomTemplate.asStateFlow()
+
+    private val _activeNotificationTemplate = MutableStateFlow(
+        sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.STATUS_NOTIFICATION)
+    )
+    val activeNotificationTemplate: StateFlow<WidgetCustomTemplate> = _activeNotificationTemplate.asStateFlow()
+
+    private val _activeTileTemplate = MutableStateFlow(
+        sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.CONTROL_CENTER_TILE)
+    )
+    val activeTileTemplate: StateFlow<WidgetCustomTemplate> = _activeTileTemplate.asStateFlow()
 
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: Intent?) {
@@ -820,23 +837,44 @@ class IqubeBleManager(
         startBleScanAndConnect()
     }
 
-    fun updateActiveCustomTemplate(template: WidgetCustomTemplate) {
-        _activeCustomTemplate.value = template
-        IqubeSharedStorageManager.getInstance(context).saveActiveTemplate(template)
+    fun updateActiveCustomTemplate(template: WidgetCustomTemplate, pinToHome: Boolean = false) {
+        val updatedList = sharedStorage.upsertTemplate(template)
+        _savedTemplates.value = updatedList
+        when (template.targetSurface) {
+            com.example.model.TargetSurface.APP_WIDGET -> {
+                _activeCustomTemplate.value = template
+                com.example.widget.IqubeAppWidgetProvider.activateAndPinWidgetTemplate(
+                    context = context,
+                    template = template,
+                    requestSystemPinDialog = pinToHome
+                )
+            }
+            com.example.model.TargetSurface.STATUS_NOTIFICATION -> {
+                _activeNotificationTemplate.value = template
+                IqubeBleForegroundService.refreshNotification(context)
+            }
+            com.example.model.TargetSurface.CONTROL_CENTER_TILE -> {
+                _activeTileTemplate.value = template
+                com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+            }
+        }
         com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
         com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
     }
 
+    fun deleteCustomTemplate(templateId: String) {
+        val updatedList = sharedStorage.deleteTemplate(templateId)
+        _savedTemplates.value = updatedList
+        _activeCustomTemplate.value = sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.APP_WIDGET)
+        _activeNotificationTemplate.value = sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.STATUS_NOTIFICATION)
+        _activeTileTemplate.value = sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.CONTROL_CENTER_TILE)
+        com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+        com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+        IqubeBleForegroundService.refreshNotification(context)
+    }
+
     fun importCanvaImage(uri: Uri): String? {
-        val path = IqubeSharedStorageManager.getInstance(context).importCanvaTemplateImage(uri)
-        if (path != null) {
-            val updated = _activeCustomTemplate.value.copy(
-                themePreset = WidgetThemePreset.CANVA_CUSTOM,
-                backgroundImagePath = path
-            )
-            updateActiveCustomTemplate(updated)
-        }
-        return path
+        return sharedStorage.importCanvaTemplateImage(uri)
     }
 
     fun backupAllData(): Boolean {
@@ -845,9 +883,13 @@ class IqubeBleManager(
 
     fun restoreAllData(): Boolean {
         val ok = tripRepository.restoreAllFromSharedStorage()
-        _activeCustomTemplate.value = IqubeSharedStorageManager.getInstance(context).loadActiveTemplate()
+        _savedTemplates.value = sharedStorage.loadTemplates()
+        _activeCustomTemplate.value = sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.APP_WIDGET)
+        _activeNotificationTemplate.value = sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.STATUS_NOTIFICATION)
+        _activeTileTemplate.value = sharedStorage.loadActiveTemplateForSurface(com.example.model.TargetSurface.CONTROL_CENTER_TILE)
         com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
         com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+        IqubeBleForegroundService.refreshNotification(context)
         return ok
     }
 
