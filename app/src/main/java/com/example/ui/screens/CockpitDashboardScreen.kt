@@ -2258,11 +2258,11 @@ private fun ClusterLocationSyncCard(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 val presets = listOf(
-                    450L to "Steady 0.45s (No Flicker)",
-                    750L to "Fast 0.75s",
-                    1500L to "1.5s",
-                    3000L to "3.0s",
-                    5000L to "5.0s"
+                    1000L to "1.0s",
+                    1500L to "Steady 1.5s",
+                    2500L to "2.5s",
+                    5000L to "5.0s",
+                    10000L to "10s"
                 )
                 presets.forEach { (ms, label) ->
                     val isSelected = locationRefreshIntervalMs == ms

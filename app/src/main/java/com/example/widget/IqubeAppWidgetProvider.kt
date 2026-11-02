@@ -173,16 +173,65 @@ class IqubeAppWidgetProvider : AppWidgetProvider() {
             }
             views.setTextViewText(R.id.widget_last_seen, timeStr)
 
-            // Click Intent opens MainActivity
-            val intent = Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            // Read custom template from shared storage
+            val activeTemplate = com.example.ble.IqubeSharedStorageManager.getInstance(context).loadActiveTemplate()
+            runCatching {
+                val accentColor = Color.parseColor(activeTemplate.accentColorHex)
+                views.setTextColor(R.id.widget_title, accentColor)
+                if (!isCharging) {
+                    views.setTextColor(R.id.widget_battery_pct, Color.parseColor(activeTemplate.textColorHex))
+                }
             }
-            val pendingIntent = PendingIntent.getActivity(
-                context,
-                0,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
+
+            // Click Intent configured by active template
+            val pendingIntent = when (activeTemplate.clickAction) {
+                com.example.model.ClickAction.TRIGGER_BLE_CONNECT -> {
+                    val connectIntent = Intent(context, com.example.ble.IqubeBleForegroundService::class.java).apply {
+                        action = com.example.ble.IqubeBleForegroundService.ACTION_TRIGGER_CONNECT
+                    }
+                    PendingIntent.getService(
+                        context,
+                        101,
+                        connectIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                }
+                com.example.model.ClickAction.OPEN_STUDIO_SANDBOX -> {
+                    val intent = Intent(context, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        putExtra("NAV_DESTINATION", "studio_sandbox")
+                    }
+                    PendingIntent.getActivity(
+                        context,
+                        102,
+                        intent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                }
+                com.example.model.ClickAction.OPEN_SAVED_TRIPS -> {
+                    val intent = Intent(context, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        putExtra("NAV_DESTINATION", "saved_trips")
+                    }
+                    PendingIntent.getActivity(
+                        context,
+                        103,
+                        intent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                }
+                else -> {
+                    val intent = Intent(context, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    }
+                    PendingIntent.getActivity(
+                        context,
+                        0,
+                        intent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                }
+            }
             views.setOnClickPendingIntent(R.id.widget_container, pendingIntent)
 
             appWidgetManager.updateAppWidget(appWidgetId, views)

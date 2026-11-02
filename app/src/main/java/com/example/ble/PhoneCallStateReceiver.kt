@@ -19,6 +19,7 @@ class PhoneCallStateReceiver : BroadcastReceiver() {
 
         val stateStr = intent.getStringExtra(TelephonyManager.EXTRA_STATE) ?: return
         val bleManager = IqubeBleManager.getInstance(context)
+        if (!bleManager.isActivelyConnectedOrReplaying()) return
 
         when (stateStr) {
             TelephonyManager.EXTRA_STATE_RINGING -> {

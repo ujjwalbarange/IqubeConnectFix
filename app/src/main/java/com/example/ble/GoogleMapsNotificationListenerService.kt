@@ -67,6 +67,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
             // Inspect any already-active notifications safely without blocking the binder thread
             serviceScope.launch {
                 runCatching {
+                    val bleManager = IqubeBleManager.getInstance(applicationContext)
+                    if (!bleManager.isActivelyConnectedOrReplaying()) return@launch
                     val currentActive = activeNotifications ?: emptyArray()
                     for (sbn in currentActive) {
                         if (sbn?.packageName == GOOGLE_MAPS_PACKAGE) {
@@ -89,6 +91,8 @@ class GoogleMapsNotificationListenerService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         runCatching {
             if (sbn == null || sbn.packageName != GOOGLE_MAPS_PACKAGE) return
+            val bleManager = IqubeBleManager.getInstance(applicationContext)
+            if (!bleManager.isActivelyConnectedOrReplaying()) return
             // Extract lightweight immutable snapshot immediately and process asynchronously
             val notification = sbn.notification ?: return
             val isOngoing = sbn.isOngoing || ((notification.flags and Notification.FLAG_ONGOING_EVENT) != 0)

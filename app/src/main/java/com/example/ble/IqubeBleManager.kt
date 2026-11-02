@@ -38,6 +38,7 @@ import com.example.model.ChargingAlertType
 import com.example.model.ActiveTripSession
 import com.example.model.BleConnectionPhase
 import com.example.model.ChargingMonitorState
+import com.example.model.ClickAction
 import com.example.model.GoogleMapsListenerState
 import com.example.model.GpsBleFusionSample
 import com.example.model.IncomingCallRelayState
@@ -51,10 +52,15 @@ import com.example.model.PhoneStatusState
 import com.example.model.RideMode
 import com.example.model.SavedChargingSession
 import com.example.model.SavedTripRecord
+import com.example.model.TargetSurface
+import com.example.model.TemplateElement
 import com.example.model.TripSubcommandConfig
 import com.example.model.TrueRangeCalculation
 import com.example.model.TurnTypeConstant
+import com.example.model.WidgetCustomTemplate
+import com.example.model.WidgetThemePreset
 import com.example.model.toHexString
+import android.net.Uri
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -287,6 +293,48 @@ class IqubeBleManager(
 
     private val _autoReconnectEnabled = MutableStateFlow(true)
     val autoReconnectEnabled: StateFlow<Boolean> = _autoReconnectEnabled.asStateFlow()
+
+    private var disconnectTimestampMs: Long = 0L
+
+    private val _autoReconnectWindowExpired = MutableStateFlow(false)
+    val autoReconnectWindowExpired: StateFlow<Boolean> = _autoReconnectWindowExpired.asStateFlow()
+
+    private val _activeCustomTemplate = MutableStateFlow(
+        IqubeSharedStorageManager.getInstance(context).loadActiveTemplate()
+    )
+    val activeCustomTemplate: StateFlow<WidgetCustomTemplate> = _activeCustomTemplate.asStateFlow()
+
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                when (state) {
+                    BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_OFF -> {
+                        reconnectJob?.cancel()
+                        scanJob?.cancel()
+                        _connectionPhase.value = BleConnectionPhase.DISCONNECTED
+                        _linkWarningMessage.value = "Bluetooth disabled on device. Scanning paused."
+                    }
+                    BluetoothAdapter.STATE_ON -> {
+                        if (!isActivelyConnectedOrReplaying() && _autoReconnectEnabled.value && !_autoReconnectWindowExpired.value) {
+                            scheduleExponentialBackoffReconnect()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    init {
+        runCatching {
+            val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(bluetoothStateReceiver, filter)
+            }
+        }
+    }
 
     private val _heartbeatEnabled = MutableStateFlow(true)
     val heartbeatEnabled: StateFlow<Boolean> = _heartbeatEnabled.asStateFlow()
@@ -754,11 +802,53 @@ class IqubeBleManager(
     @Volatile
     private var lastBannerHoldUntilMs: Long = 0L
 
-    private fun isActivelyConnectedOrReplaying(): Boolean {
+    fun isActivelyConnectedOrReplaying(): Boolean {
         val phase = _connectionPhase.value
         return phase == BleConnectionPhase.STREAMING_ACTIVE ||
             phase == BleConnectionPhase.REPLAYING_RIDING_LOG ||
             phase == BleConnectionPhase.REPLAYING_CHARGING_LOG
+    }
+
+    fun isBluetoothAdapterEnabled(): Boolean {
+        return bluetoothAdapter?.isEnabled == true
+    }
+
+    fun resetAutoReconnectWindowAndConnect() {
+        disconnectTimestampMs = System.currentTimeMillis()
+        _autoReconnectWindowExpired.value = false
+        reconnectAttemptCount = 0
+        startBleScanAndConnect()
+    }
+
+    fun updateActiveCustomTemplate(template: WidgetCustomTemplate) {
+        _activeCustomTemplate.value = template
+        IqubeSharedStorageManager.getInstance(context).saveActiveTemplate(template)
+        com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+        com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+    }
+
+    fun importCanvaImage(uri: Uri): String? {
+        val path = IqubeSharedStorageManager.getInstance(context).importCanvaTemplateImage(uri)
+        if (path != null) {
+            val updated = _activeCustomTemplate.value.copy(
+                themePreset = WidgetThemePreset.CANVA_CUSTOM,
+                backgroundImagePath = path
+            )
+            updateActiveCustomTemplate(updated)
+        }
+        return path
+    }
+
+    fun backupAllData(): Boolean {
+        return tripRepository.backupAllToSharedStorage()
+    }
+
+    fun restoreAllData(): Boolean {
+        val ok = tripRepository.restoreAllFromSharedStorage()
+        _activeCustomTemplate.value = IqubeSharedStorageManager.getInstance(context).loadActiveTemplate()
+        com.example.widget.IqubeAppWidgetProvider.updateAllWidgets(context)
+        com.example.tile.IqubeQuickSettingsTileService.requestTileUpdate(context)
+        return ok
     }
 
     fun setAutoReconnect(enabled: Boolean) {
@@ -825,10 +915,15 @@ class IqubeBleManager(
      * 4. Top-Line GPS Locality Pin (`0x5B 0x5C`, e.g. `"Dhantoli"`)
      */
     private fun performConnectionHandshakeSequence() {
-        sendPhoneStatusRelayNow()
-        syncClockToClusterNow(isBackgroundHeartbeat = false)
-        syncRiderGreetingToCluster(_riderGreetingName.value)
-        dumpLocationToClusterNow()
+        scope.launch {
+            sendPhoneStatusRelayNow()
+            delay(180L)
+            syncClockToClusterNow(isBackgroundHeartbeat = false)
+            delay(180L)
+            syncRiderGreetingToCluster(_riderGreetingName.value)
+            delay(180L)
+            dumpLocationToClusterNow(ensureKeepAlive = false)
+        }
     }
 
     /**
@@ -1129,7 +1224,7 @@ class IqubeBleManager(
                 while (isActive && _navigationState.value.distanceMeters > 0 &&
                     _navigationState.value.selectedTurn != TurnTypeConstant.DESTINATION_REACHED
                 ) {
-                    val intervalMs = _locationRefreshIntervalMs.value.coerceIn(300L, 2_000L)
+                    val intervalMs = _locationRefreshIntervalMs.value.coerceIn(1000L, 10_000L)
                     delay(intervalMs)
                     if (commandDispatcher.queueDepth.value <= 1 && !_incomingCallState.value.isRinging) {
                         val currentNav = _navigationState.value
@@ -1476,12 +1571,14 @@ class IqubeBleManager(
     fun startBleScanAndConnect() {
         stopReplayModeIfNeeded()
         reconnectJob?.cancel()
+        disconnectTimestampMs = System.currentTimeMillis()
+        _autoReconnectWindowExpired.value = false
         startGpsTelemetryFusion()
         IqubeBleForegroundService.startService(context)
 
         val adapter = bluetoothAdapter
         if (adapter == null || !adapter.isEnabled) {
-            _linkWarningMessage.value = "Bluetooth adapter is disabled or unavailable on this device."
+            _linkWarningMessage.value = "Bluetooth adapter is disabled. BLE scanning paused."
             _connectionPhase.value = BleConnectionPhase.DISCONNECTED
             return
         }
@@ -1954,7 +2051,7 @@ class IqubeBleManager(
         heartbeatJob = scope.launch {
             while (isActive) {
                 delay(IqubeBleSpec.HEARTBEAT_INTERVAL_MS)
-                if (isActivelyConnectedOrReplaying() && _heartbeatEnabled.value && !_isLinkDegraded.value) {
+                if (isActivelyConnectedOrReplaying() && _heartbeatEnabled.value) {
                     syncClockToClusterNow(isBackgroundHeartbeat = true)
                 }
                 if (_connectionPhase.value == BleConnectionPhase.STREAMING_ACTIVE) {
@@ -1972,7 +2069,7 @@ class IqubeBleManager(
         phoneStatusKeepaliveJob = scope.launch {
             while (isActive) {
                 delay(IqubeBleSpec.PHONE_STATUS_SYNC_INTERVAL_MS)
-                if (isActivelyConnectedOrReplaying() && !_isLinkDegraded.value) {
+                if (isActivelyConnectedOrReplaying()) {
                     sendPhoneStatusRelayNow()
                 }
             }
@@ -1981,7 +2078,7 @@ class IqubeBleManager(
         watchdogJob?.cancel()
         watchdogJob = scope.launch {
             while (isActive) {
-                delay(500L)
+                delay(1000L)
                 if (isActivelyConnectedOrReplaying()) {
                     val lastRx = packetParser.telemetryState.value.lastPacketTimestampMs
                     if (lastRx != null) {
@@ -1989,7 +2086,15 @@ class IqubeBleManager(
                         if (silenceMs > IqubeBleSpec.LINK_WATCHDOG_DEGRADED_MS) {
                             _isLinkDegraded.value = true
                             _linkWarningMessage.value =
-                                "Link Degraded (${silenceMs}ms silence) — Supervision Timeout (0x08) Imminent. Heartbeats paused."
+                                "Link Degraded (${silenceMs / 1000}s silence) — Re-asserting link heartbeat…"
+                            syncClockToClusterNow(isBackgroundHeartbeat = true)
+                            try {
+                                activeGatt?.readRemoteRssi()
+                            } catch (_: Exception) {
+                            }
+                        } else if (_isLinkDegraded.value) {
+                            _isLinkDegraded.value = false
+                            _linkWarningMessage.value = null
                         }
                     }
                 }
@@ -1998,9 +2103,7 @@ class IqubeBleManager(
     }
 
     private fun onWriteAckTimeoutDetected() {
-        _isLinkDegraded.value = true
-        _linkWarningMessage.value =
-            "ATT Write Request (0x12) unacknowledged >500ms (Packet #1676 condition). Heartbeats paused."
+        // Do not pause heartbeats or freeze queue on transient write ACK delay
     }
 
     @SuppressLint("MissingPermission")
@@ -2045,22 +2148,37 @@ class IqubeBleManager(
 
         val gatt = activeGatt ?: return false
         val writeChar = writeCharacteristic ?: return false
+        val props = writeChar.properties
+        val writeType = if ((props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
+
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val success = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val res = gatt.writeCharacteristic(
                     writeChar,
                     payload,
-                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    writeType
                 )
                 res == BluetoothGatt.GATT_SUCCESS
             } else {
                 @Suppress("DEPRECATION")
-                writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                writeChar.writeType = writeType
                 @Suppress("DEPRECATION")
                 writeChar.value = payload
                 @Suppress("DEPRECATION")
                 gatt.writeCharacteristic(writeChar)
             }
+
+            if (success && writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
+                scope.launch {
+                    delay(IqubeBleSpec.INTER_COMMAND_SPACING_MS)
+                    commandDispatcher.onWriteResponseReceived(0)
+                }
+            }
+            success
         } catch (_: Exception) {
             false
         }
@@ -2105,14 +2223,13 @@ class IqubeBleManager(
         locationSyncJob?.cancel()
         locationSyncJob = scope.launch {
             while (isActive) {
-                val intervalMs = _locationRefreshIntervalMs.value.coerceIn(250L, 30_000L)
+                val intervalMs = _locationRefreshIntervalMs.value.coerceIn(1000L, 30_000L)
                 delay(intervalMs)
                 val nowMs = System.currentTimeMillis()
                 val isNavKeepAliveActive = navKeepAliveJob?.isActive == true
-                // Continuously refresh 0x5B 0x5C Location before the cluster's 1-second hardware timer expires
                 if (isActivelyConnectedOrReplaying() && _autoLocationSyncEnabled.value &&
                     !_incomingCallState.value.isRinging && !isNavKeepAliveActive &&
-                    nowMs >= lastBannerHoldUntilMs && !_isLinkDegraded.value &&
+                    nowMs >= lastBannerHoldUntilMs &&
                     commandDispatcher.queueDepth.value <= 1
                 ) {
                     dumpLocationToClusterNow(ensureKeepAlive = false)
@@ -2841,6 +2958,9 @@ class IqubeBleManager(
 
     private fun handleHardwareDisconnect(reason: String) {
         val wasChargingBeforeDisconnect = packetParser.telemetryState.value.isCharging
+        if (disconnectTimestampMs == 0L || isActivelyConnectedOrReplaying()) {
+            disconnectTimestampMs = System.currentTimeMillis()
+        }
         captureLastParkedLocationOnDisconnect()
         finalizeSessionOnDisconnect(reason, keepOfflineChargingPrediction = true)
         closeGattCleanly()
@@ -2864,14 +2984,27 @@ class IqubeBleManager(
     private fun scheduleExponentialBackoffReconnect() {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
+            if (disconnectTimestampMs > 0L && (System.currentTimeMillis() - disconnectTimestampMs) >= DISCONNECT_AUTOSCAN_WINDOW_MS) {
+                _autoReconnectWindowExpired.value = true
+                _connectionPhase.value = BleConnectionPhase.DISCONNECTED
+                _linkWarningMessage.value = "Auto-reconnect scan window (30m) paused to save battery. Tap Connect."
+                return@launch
+            }
+            _autoReconnectWindowExpired.value = false
             _connectionPhase.value = BleConnectionPhase.RECONNECTING_BACKOFF
             val attempt = ++reconnectAttemptCount
             val backoffMs = min(30_000L, 1500L * (1L shl min(attempt, 4)))
             _linkWarningMessage.value =
-                "Link lost. Auto-reconnect attempt #$attempt in ${backoffMs / 1000.0}s (30s HCI cancel guard)…"
+                "Link lost. Auto-reconnect attempt #$attempt in ${backoffMs / 1000.0}s (30m battery saver active)…"
             delay(backoffMs)
             if (isActive && _autoReconnectEnabled.value) {
-                startBleScanAndConnect()
+                if ((System.currentTimeMillis() - disconnectTimestampMs) >= DISCONNECT_AUTOSCAN_WINDOW_MS) {
+                    _autoReconnectWindowExpired.value = true
+                    _connectionPhase.value = BleConnectionPhase.DISCONNECTED
+                    _linkWarningMessage.value = "Auto-reconnect scan window (30m) paused to save battery. Tap Connect."
+                } else {
+                    startBleScanAndConnect()
+                }
             }
         }
     }
@@ -2972,6 +3105,7 @@ class IqubeBleManager(
     }
 
     companion object {
+        const val DISCONNECT_AUTOSCAN_WINDOW_MS = 30 * 60 * 1000L // 30 minutes auto-reconnect window
         const val ACTION_STOP_CHARGING_ALARM = "com.example.ble.ACTION_STOP_CHARGING_ALARM"
         const val CHARGING_ALARM_NOTIFICATION_ID = 5050
 

@@ -130,7 +130,7 @@ fun CommandStudioScreen(
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "Steady 0.45s",
+                            text = "Auto Sync",
                             style = MaterialTheme.typography.labelSmall,
                             color = NeonMint
                         )

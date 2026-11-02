@@ -27,6 +27,8 @@ import com.example.model.TelemetryState
 import com.example.model.TripSubcommandConfig
 import com.example.model.TrueRangeCalculation
 import com.example.model.TurnTypeConstant
+import com.example.model.WidgetCustomTemplate
+import android.net.Uri
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.asStateFlow
 enum class DashboardDestination(val route: String, val title: String) {
     COCKPIT("cockpit", "Cockpit"),
     SAVED_TRIPS("saved_trips", "Saved Trips"),
+    STUDIO_SANDBOX("studio_sandbox", "Studio"),
     COMMAND_STUDIO("command_studio", "Cluster Sync"),
     GPS_LOGGER("gps_logger", "GPS & Park"),
     HEX_INSPECTOR("hex_inspector", "Hex Inspector")
@@ -343,6 +346,28 @@ class IqubeDashboardViewModel(application: Application) : AndroidViewModel(appli
 
     fun startGpsTelemetryFusion() {
         bleManager.startGpsTelemetryFusion()
+    }
+
+    val activeCustomTemplate: StateFlow<WidgetCustomTemplate> = bleManager.activeCustomTemplate
+
+    fun saveCustomTemplate(template: WidgetCustomTemplate) {
+        bleManager.updateActiveCustomTemplate(template)
+    }
+
+    fun importCanvaImage(uri: Uri): String? {
+        return bleManager.importCanvaImage(uri)
+    }
+
+    fun backupAllData(): Boolean {
+        return bleManager.backupAllData()
+    }
+
+    fun restoreAllData(): Boolean {
+        return bleManager.restoreAllData()
+    }
+
+    fun getSharedStorageBackupPath(): String {
+        return bleManager.tripRepository.getSharedStorageBackupPath()
     }
 
     override fun onCleared() {

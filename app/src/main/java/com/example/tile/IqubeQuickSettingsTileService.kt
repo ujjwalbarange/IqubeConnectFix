@@ -162,8 +162,18 @@ class IqubeQuickSettingsTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        val activeTemplate = com.example.ble.IqubeSharedStorageManager.getInstance(applicationContext).loadActiveTemplate()
+        if (activeTemplate.clickAction == com.example.model.ClickAction.TRIGGER_BLE_CONNECT) {
+            val bleManager = IqubeBleManager.getInstance(applicationContext)
+            bleManager.resetAutoReconnectWindowAndConnect()
+        }
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (activeTemplate.clickAction == com.example.model.ClickAction.OPEN_STUDIO_SANDBOX) {
+                putExtra("NAV_DESTINATION", "studio_sandbox")
+            } else if (activeTemplate.clickAction == com.example.model.ClickAction.OPEN_SAVED_TRIPS) {
+                putExtra("NAV_DESTINATION", "saved_trips")
+            }
         }
 
         try {

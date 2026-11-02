@@ -685,7 +685,14 @@ class TrueRangeAndTripRepository(private val context: Context?) {
     }
 
     private fun loadTripsFromStorage(): List<SavedTripRecord> {
-        val raw = prefs?.getString(KEY_SAVED_TRIPS_JSON, null) ?: return emptyList()
+        var raw = prefs?.getString(KEY_SAVED_TRIPS_JSON, null)
+        if (raw.isNullOrBlank()) {
+            raw = context?.let { IqubeSharedStorageManager.getInstance(it).loadTripsBackup() }
+            if (!raw.isNullOrBlank()) {
+                prefs?.edit()?.putString(KEY_SAVED_TRIPS_JSON, raw)?.apply()
+            }
+        }
+        if (raw.isNullOrBlank()) return emptyList()
         return try {
             val arr = JSONArray(raw)
             val list = ArrayList<SavedTripRecord>(arr.length())
@@ -734,7 +741,9 @@ class TrueRangeAndTripRepository(private val context: Context?) {
         for (t in trips) {
             arr.put(tripToJsonObject(t))
         }
-        prefs?.edit()?.putString(KEY_SAVED_TRIPS_JSON, arr.toString())?.apply()
+        val jsonStr = arr.toString()
+        prefs?.edit()?.putString(KEY_SAVED_TRIPS_JSON, jsonStr)?.apply()
+        context?.let { IqubeSharedStorageManager.getInstance(it).saveTripsBackup(jsonStr) }
     }
 
     private fun tripToJsonObject(t: SavedTripRecord): JSONObject {
@@ -767,8 +776,52 @@ class TrueRangeAndTripRepository(private val context: Context?) {
         }
     }
 
+    fun backupAllToSharedStorage(): Boolean {
+        if (context == null) return false
+        val sharedMgr = IqubeSharedStorageManager.getInstance(context)
+        val tripsJson = exportTripsToJson()
+        val chargingJson = JSONArray().apply {
+            for (s in _savedChargingSessions.value) {
+                put(chargingSessionToJsonObject(s))
+            }
+        }.toString()
+        val ok1 = sharedMgr.saveTripsBackup(tripsJson)
+        val ok2 = sharedMgr.saveChargingBackup(chargingJson)
+        return ok1 && ok2
+    }
+
+    fun restoreAllFromSharedStorage(): Boolean {
+        if (context == null) return false
+        val sharedMgr = IqubeSharedStorageManager.getInstance(context)
+        val tripsJson = sharedMgr.loadTripsBackup()
+        val chargingJson = sharedMgr.loadChargingBackup()
+        var restoredAny = false
+        if (!tripsJson.isNullOrBlank()) {
+            prefs?.edit()?.putString(KEY_SAVED_TRIPS_JSON, tripsJson)?.apply()
+            _savedTrips.value = loadTripsFromStorage()
+            restoredAny = true
+        }
+        if (!chargingJson.isNullOrBlank()) {
+            prefs?.edit()?.putString(KEY_SAVED_CHARGING_JSON, chargingJson)?.apply()
+            _savedChargingSessions.value = loadChargingSessionsFromStorage()
+            restoredAny = true
+        }
+        return restoredAny
+    }
+
+    fun getSharedStorageBackupPath(): String {
+        return context?.let { IqubeSharedStorageManager.getInstance(it).getSharedDirPath() } ?: "Documents/iQubeCockpit"
+    }
+
     private fun loadChargingSessionsFromStorage(): List<SavedChargingSession> {
-        val raw = prefs?.getString(KEY_SAVED_CHARGING_JSON, null) ?: return emptyList()
+        var raw = prefs?.getString(KEY_SAVED_CHARGING_JSON, null)
+        if (raw.isNullOrBlank()) {
+            raw = context?.let { IqubeSharedStorageManager.getInstance(it).loadChargingBackup() }
+            if (!raw.isNullOrBlank()) {
+                prefs?.edit()?.putString(KEY_SAVED_CHARGING_JSON, raw)?.apply()
+            }
+        }
+        if (raw.isNullOrBlank()) return emptyList()
         return try {
             val arr = JSONArray(raw)
             val list = ArrayList<SavedChargingSession>(arr.length())
@@ -809,32 +862,36 @@ class TrueRangeAndTripRepository(private val context: Context?) {
         }
     }
 
+    private fun chargingSessionToJsonObject(s: SavedChargingSession): JSONObject {
+        return JSONObject().apply {
+            put("id", s.id)
+            put("startTimeMs", s.startTimeMs)
+            put("endTimeMs", s.endTimeMs)
+            put("startPct", s.startPct)
+            put("endPct", s.endPct)
+            put("pctGained", s.pctGained)
+            put("durationSeconds", s.durationSeconds)
+            put("avgSecondsPerPct", s.avgSecondsPerPct)
+            put("cc0To80PctGained", s.cc0To80PctGained)
+            put("cc0To80SecondsPerPct", s.cc0To80SecondsPerPct)
+            put("cv80To100PctGained", s.cv80To100PctGained)
+            put("cv80To100SecondsPerPct", s.cv80To100SecondsPerPct)
+            put("estimatedKwhAdded", s.estimatedKwhAdded)
+            put("trueEcoRangeAddedKm", s.trueEcoRangeAddedKm)
+            put("wasOfflinePredicted", s.wasOfflinePredicted)
+            put("calibrationDeltaPct", s.calibrationDeltaPct)
+            put("sessionSource", s.sessionSource)
+        }
+    }
+
     private fun persistChargingSessionsToStorage(sessions: List<SavedChargingSession>) {
         val arr = JSONArray()
         for (s in sessions) {
-            arr.put(
-                JSONObject().apply {
-                    put("id", s.id)
-                    put("startTimeMs", s.startTimeMs)
-                    put("endTimeMs", s.endTimeMs)
-                    put("startPct", s.startPct)
-                    put("endPct", s.endPct)
-                    put("pctGained", s.pctGained)
-                    put("durationSeconds", s.durationSeconds)
-                    put("avgSecondsPerPct", s.avgSecondsPerPct)
-                    put("cc0To80PctGained", s.cc0To80PctGained)
-                    put("cc0To80SecondsPerPct", s.cc0To80SecondsPerPct)
-                    put("cv80To100PctGained", s.cv80To100PctGained)
-                    put("cv80To100SecondsPerPct", s.cv80To100SecondsPerPct)
-                    put("estimatedKwhAdded", s.estimatedKwhAdded)
-                    put("trueEcoRangeAddedKm", s.trueEcoRangeAddedKm)
-                    put("wasOfflinePredicted", s.wasOfflinePredicted)
-                    put("calibrationDeltaPct", s.calibrationDeltaPct)
-                    put("sessionSource", s.sessionSource)
-                }
-            )
+            arr.put(chargingSessionToJsonObject(s))
         }
-        prefs?.edit()?.putString(KEY_SAVED_CHARGING_JSON, arr.toString())?.apply()
+        val jsonStr = arr.toString()
+        prefs?.edit()?.putString(KEY_SAVED_CHARGING_JSON, jsonStr)?.apply()
+        context?.let { IqubeSharedStorageManager.getInstance(it).saveChargingBackup(jsonStr) }
     }
 
     private fun loadLastSeenStateFromStorage(): LastSeenScooterState? {

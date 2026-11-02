@@ -56,6 +56,10 @@ class IqubeBleForegroundService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
+        } else if (intent?.action == ACTION_TRIGGER_CONNECT) {
+            val bleManager = IqubeBleManager.getInstance(applicationContext)
+            bleManager.resetAutoReconnectWindowAndConnect()
+            return START_STICKY
         }
 
         startInForeground()
@@ -294,14 +298,30 @@ class IqubeBleForegroundService : Service() {
                                 isCharging = false
                             )
 
-                            if (!state.autoReconnect && !state.charging.isDisconnectedPredicted && !state.charging.isCharging) {
-                                delay(4000L)
-                                if (bleManager.connectionPhase.value == BleConnectionPhase.DISCONNECTED &&
-                                    !bleManager.autoReconnectEnabled.value &&
-                                    !bleManager.chargingMonitorState.value.isCharging
-                                ) {
-                                    stopForeground(STOP_FOREGROUND_REMOVE)
-                                    stopSelf()
+                            val isOfflineCharging = state.charging.isDisconnectedPredicted || state.charging.isCharging
+                            val isWindowExpired = bleManager.autoReconnectWindowExpired.value
+                            val isBtDisabled = !bleManager.isBluetoothAdapterEnabled()
+
+                            if (!isOfflineCharging) {
+                                if (isWindowExpired || !state.autoReconnect || isBtDisabled) {
+                                    delay(4000L)
+                                    if (bleManager.connectionPhase.value == BleConnectionPhase.DISCONNECTED &&
+                                        !bleManager.chargingMonitorState.value.isCharging &&
+                                        (bleManager.autoReconnectWindowExpired.value || !bleManager.autoReconnectEnabled.value || !bleManager.isBluetoothAdapterEnabled())
+                                    ) {
+                                        stopForeground(STOP_FOREGROUND_REMOVE)
+                                        stopSelf()
+                                    }
+                                }
+                            } else {
+                                if ((state.charging.currentBatteryPct ?: 0) >= 100) {
+                                    delay(5000L)
+                                    if ((bleManager.chargingMonitorState.value.currentBatteryPct ?: 0) >= 100 &&
+                                        !bleManager.isActivelyConnectedOrReplaying()
+                                    ) {
+                                        stopForeground(STOP_FOREGROUND_REMOVE)
+                                        stopSelf()
+                                    }
                                 }
                             }
                         }
@@ -393,6 +413,21 @@ class IqubeBleForegroundService : Service() {
                 "Disconnect",
                 disconnectPendingIntent
             )
+        } else {
+            val connectIntent = Intent(this, IqubeBleForegroundService::class.java).apply {
+                action = ACTION_TRIGGER_CONNECT
+            }
+            val connectPendingIntent = PendingIntent.getService(
+                this,
+                2,
+                connectIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(
+                android.R.drawable.stat_sys_data_bluetooth,
+                "Connect",
+                connectPendingIntent
+            )
         }
 
         return builder.build()
@@ -452,6 +487,7 @@ class IqubeBleForegroundService : Service() {
         const val CHARGING_ALERT_CHANNEL_ID = "iqube_charging_alert_channel"
         const val NOTIFICATION_ID = 4096
         const val ACTION_STOP_SERVICE = "com.example.ble.ACTION_STOP_SERVICE"
+        const val ACTION_TRIGGER_CONNECT = "com.example.ble.ACTION_TRIGGER_CONNECT"
 
         fun startService(context: Context) {
             val intent = Intent(context, IqubeBleForegroundService::class.java)

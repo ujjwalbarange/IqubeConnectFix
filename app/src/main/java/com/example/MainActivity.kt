@@ -25,11 +25,13 @@ import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Widgets
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -53,6 +55,7 @@ import com.example.ui.IqubeDashboardViewModel
 import com.example.ui.components.TopConnectionHeader
 import com.example.ui.screens.CockpitDashboardScreen
 import com.example.ui.screens.CommandStudioScreen
+import com.example.ui.screens.CustomizationStudioScreen
 import com.example.ui.screens.GpsRideLoggerScreen
 import com.example.ui.screens.HexInspectorScreen
 import com.example.ui.screens.SavedTripsHistoryScreen
@@ -113,6 +116,7 @@ fun IqubeCompanionApp(
     val savedTrips by viewModel.savedTrips.collectAsStateWithLifecycle()
     val savedChargingSessions by viewModel.savedChargingSessions.collectAsStateWithLifecycle()
     val activeTripSession by viewModel.activeTripSession.collectAsStateWithLifecycle()
+    val activeCustomTemplate by viewModel.activeCustomTemplate.collectAsStateWithLifecycle()
 
     val detectedLocalityName by viewModel.detectedLocalityName.collectAsStateWithLifecycle()
     val customLocationOverride by viewModel.customLocationOverride.collectAsStateWithLifecycle()
@@ -133,6 +137,12 @@ fun IqubeCompanionApp(
     }
 
     LaunchedEffect(Unit) {
+        val navExtra = (context as? ComponentActivity)?.intent?.getStringExtra("NAV_DESTINATION")
+        if (navExtra == "studio_sandbox") {
+            viewModel.navigateTo(DashboardDestination.STUDIO_SANDBOX)
+        } else if (navExtra == "saved_trips") {
+            viewModel.navigateTo(DashboardDestination.SAVED_TRIPS)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -322,6 +332,22 @@ fun IqubeCompanionApp(
                                     onExportJson = viewModel::exportSavedTripsJson
                                 )
                             }
+                            DashboardDestination.STUDIO_SANDBOX -> {
+                                CustomizationStudioScreen(
+                                    activeTemplate = activeCustomTemplate,
+                                    onSaveTemplate = viewModel::saveCustomTemplate,
+                                    onImportCanvaImage = viewModel::importCanvaImage,
+                                    onBackupAllData = viewModel::backupAllData,
+                                    onRestoreAllData = viewModel::restoreAllData,
+                                    backupFolderPath = viewModel.getSharedStorageBackupPath(),
+                                    currentBatteryPct = telemetry.batteryPercent ?: chargingMonitor.currentBatteryPct ?: lastSeenState?.batteryPct ?: 87,
+                                    currentRangeKm = telemetry.clusterRangeKm ?: chargingMonitor.clusterRangeKm ?: lastSeenState?.clusterRangeKm ?: 92.0,
+                                    trueEcoKm = trueRange.trueEcoRangeKm ?: 87.0,
+                                    truePowerKm = trueRange.truePowerRangeKm ?: 65.3,
+                                    localityName = detectedLocalityName.ifBlank { lastSeenState?.locationName ?: "Medical College Rd" },
+                                    isCharging = telemetry.isCharging || chargingMonitor.isCharging
+                                )
+                            }
                             DashboardDestination.COMMAND_STUDIO -> {
                                 CommandStudioScreen(
                                     commandHistory = commandHistory,
@@ -437,6 +463,7 @@ private fun IqubeSideNavigationRail(
 private fun destinationIcon(dest: DashboardDestination, selected: Boolean) = when (dest) {
     DashboardDestination.COCKPIT -> if (selected) Icons.Filled.Dashboard else Icons.Outlined.Dashboard
     DashboardDestination.SAVED_TRIPS -> if (selected) Icons.Filled.History else Icons.Outlined.History
+    DashboardDestination.STUDIO_SANDBOX -> if (selected) Icons.Filled.Widgets else Icons.Outlined.Widgets
     DashboardDestination.COMMAND_STUDIO -> if (selected) Icons.Filled.Tune else Icons.Outlined.Tune
     DashboardDestination.GPS_LOGGER -> if (selected) Icons.Filled.Explore else Icons.Outlined.Explore
     DashboardDestination.HEX_INSPECTOR -> if (selected) Icons.Filled.Code else Icons.Outlined.Code
